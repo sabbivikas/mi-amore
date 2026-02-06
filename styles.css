@@ -1,0 +1,128 @@
+:root {
+  color-scheme: only light;
+  font-family: "Oswald", "Bebas Neue", system-ui, sans-serif;
+  background: radial-gradient(circle at top, #c8dbf2 0%, #87a5c5 40%, #2c3e4f 100%);
+  --hud: #eaf6ff;
+  --hud-accent: #7ef7ff;
+  --hud-bg: rgba(4, 8, 14, 0.45);
+  --hud-warning: #ffb84d;
+}
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body,
+html,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+}
+
+#game {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.hud {
+  position: absolute;
+  top: 18px;
+  left: 18px;
+  padding: 12px 16px;
+  background: var(--hud-bg);
+  color: var(--hud);
+  border: 1px solid rgba(126, 247, 255, 0.4);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  min-width: 320px;
+  backdrop-filter: blur(6px);
+}
+
+.hud-row {
+  display: flex;
+  gap: 16px;
+  font-size: 14px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.hud-row:last-child {
+  margin-bottom: 0;
+}
+
+.meter {
+  width: 180px;
+  height: 10px;
+  border: 1px solid rgba(126, 247, 255, 0.6);
+  position: relative;
+  background: rgba(5, 12, 20, 0.6);
+}
+
+.meter-fill {
+  position: absolute;
+  top: 0;
+  left: 0;
+  bottom: 0;
+  width: 100%;
+  background: linear-gradient(90deg, #7ef7ff, #8dffb0);
+}
+
+.minimap {
+  position: absolute;
+  right: 18px;
+  bottom: 18px;
+  background: rgba(5, 9, 12, 0.6);
+  border: 1px solid rgba(126, 247, 255, 0.4);
+  padding: 8px;
+}
+
+.debug {
+  position: absolute;
+  bottom: 18px;
+  left: 18px;
+  color: var(--hud-warning);
+  background: rgba(8, 10, 12, 0.55);
+  padding: 8px 12px;
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+}
+
+.debug-label {
+  font-size: 11px;
+  color: #ffc881;
+}
+
+.debug input[type='range'] {
+  width: 100%;
+}
+
+.debug-check {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.pause {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 48px;
+  letter-spacing: 0.2em;
+  color: var(--hud);
+  background: rgba(0, 0, 0, 0.5);
+}
+
+.hidden {
+  display: none;
+}

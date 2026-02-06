@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>MN SKY DEFENSE</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="game"></canvas>
+      <div id="hud" class="hud">
+        <div class="hud-row">
+          <div id="hud-speed">SPD 0</div>
+          <div id="hud-altitude">ALT 0</div>
+          <div id="hud-heading">HDG 000</div>
+          <div id="hud-target">TGT ---</div>
+          <div id="hud-threat">THREAT LOW</div>
+        </div>
+        <div class="hud-row">
+          <div id="hud-boost" class="meter">
+            <div class="meter-fill" id="hud-boost-fill"></div>
+          </div>
+          <div id="hud-wave">WAVE 1</div>
+        </div>
+      </div>
+      <div id="minimap" class="minimap">
+        <canvas id="minimap-canvas" width="220" height="220"></canvas>
+      </div>
+      <div id="debug" class="debug hidden">
+        <div id="debug-draws">Draws 0</div>
+        <div id="debug-chunks">Chunks 0</div>
+        <label class="debug-label" for="setting-exposure">Exposure</label>
+        <input id="setting-exposure" type="range" min="0.6" max="1.8" step="0.05" value="1.1" />
+        <label class="debug-check"><input id="setting-postfx" type="checkbox" checked /> PostFX</label>
+        <label class="debug-check"><input id="setting-shadows" type="checkbox" checked /> Shadows</label>
+      </div>
+      <div id="pause" class="pause hidden">PAUSED</div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
