@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Blocky Valentine Survival</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+          "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="startMenu" class="panel">
+      <h1>Blocky Valentine Survival</h1>
+      <p>Select your character, then choose a mode.</p>
+      <div class="row">
+        <label for="characterSelect">Character</label>
+        <select id="characterSelect">
+          <option value="boy">Boy</option>
+          <option value="girl">Girl</option>
+        </select>
+      </div>
+      <div class="row">
+        <button id="toModeBtn">Continue</button>
+      </div>
+    </div>
+
+    <div id="modeMenu" class="panel hidden">
+      <h2>Mode Select</h2>
+      <div class="row stack">
+        <button id="singleModeBtn">Single Player</button>
+        <button id="multiModeBtn">Multiplayer</button>
+      </div>
+      <div class="row">
+        <button id="backToStartBtn" class="secondary">Back</button>
+      </div>
+    </div>
+
+    <div id="multiplayerMenu" class="panel hidden">
+      <h2>Multiplayer (LAN)</h2>
+      <p>2 players max, same room code.</p>
+      <div class="row">
+        <button id="createRoomBtn">Create Room</button>
+      </div>
+      <div class="row">
+        <input id="joinCodeInput" maxlength="5" placeholder="Room code" />
+        <button id="joinRoomBtn">Join Room</button>
+      </div>
+      <p id="roomInfo"></p>
+      <p id="menuError" class="error"></p>
+      <p class="hint">Use host LAN URL: http://&lt;HOST_LAN_IP&gt;:3000</p>
+      <div class="row">
+        <button id="backToModeBtn" class="secondary">Back</button>
+      </div>
+    </div>
+
+    <canvas id="game"></canvas>
+
+    <div id="hud" class="hidden">
+      <div id="stats"></div>
+      <div id="objective"></div>
+      <div id="distance"></div>
+    </div>
+
+    <canvas id="radar" width="180" height="180" class="hidden"></canvas>
+
+    <div id="deathOverlay" class="overlay hidden">You died, respawning...</div>
+
+    <div id="proposalOverlay" class="overlay hidden">
+      <div class="proposalCard">
+        <h2>Will you be my valentine?</h2>
+        <p id="proposalText"></p>
+        <div id="proposalButtons" class="row"></div>
+      </div>
+    </div>
+
+    <div id="resultOverlay" class="overlay hidden">
+      <div class="proposalCard">
+        <h2 id="resultTitle"></h2>
+        <p id="resultText"></p>
+        <button id="backToLobbyBtn">Back to Lobby</button>
+      </div>
+    </div>
+
+    <div id="singleGameOverOverlay" class="overlay hidden">
+      <div class="proposalCard">
+        <h2>Game Over</h2>
+        <p id="singleGameOverText"></p>
+        <button id="singleRestartBtn">Restart</button>
+      </div>
+    </div>
+
+    <script type="module" src="game.js"></script>
+  </body>
+</html>
