@@ -12,6 +12,12 @@ const VIEW_DISTANCE = 6;
 const WATER_LEVEL = 6;
 const SNOW_LINE = 18;
 const SEED = 133742;
+const GRASS_RADIUS = 30;
+const GRASS_DENSITY = 0.32;
+const FLOWER_DENSITY = 0.045;
+const PRESENCE_DIST = 20;
+const HEARTBEAT_DIST = 10;
+const SPARKLE_DIST = 5;
 
 const ZOMBIE_TARGET_HEIGHT = 1.95;
 const VISION_RADIUS = 18;
@@ -22,8 +28,11 @@ const ZOMBIE_MAX_SPEED = 3.2;
 
 const GIRL_TARGET_HEIGHT = 1.78;
 const BOY_TARGET_HEIGHT = 1.85;
-const WALK_SPEED = 4.5;
-const RUN_SPEED = 7.2;
+const WALK_SPEED = 2.2;
+const RUN_SPEED = 3.5;
+const GIRL_WALK_SPEED = 4.5;
+const GIRL_RUN_SPEED = 7.2;
+const FADE_TIME = 0.2;
 const COMBO_WINDOW_START = 0.45;
 const COMBO_WINDOW_END = 1.0;
 const ATTACK_COOLDOWN = 0.08;
@@ -83,6 +92,10 @@ const ui = {
   statsEl: document.getElementById('stats'),
   objectiveEl: document.getElementById('objective'),
   distanceEl: document.getElementById('distance'),
+  romanceHint: document.getElementById('romanceHint'),
+  romanticVignette: document.getElementById('romanticVignette'),
+  musicToggle: document.getElementById('musicToggle'),
+  sfxToggle: document.getElementById('sfxToggle'),
   radar: document.getElementById('radar'),
   deathOverlay: document.getElementById('deathOverlay'),
   proposalOverlay: document.getElementById('proposalOverlay'),
@@ -181,6 +194,22 @@ function terrainHeight(x, z) {
 
 function moistureAt(seed, x, z) {
   return fbm(seed ^ 0x27d4eb2f, x * 0.03, z * 0.03, 3);
+}
+
+function terrainSurfaceType(seed, x, z, h = terrainHeightWithSeed(seed, x, z)) {
+  const slope = Math.abs(
+    terrainHeightWithSeed(seed, x + 1, z) -
+    terrainHeightWithSeed(seed, x - 1, z)
+  ) + Math.abs(
+    terrainHeightWithSeed(seed, x, z + 1) -
+    terrainHeightWithSeed(seed, x, z - 1)
+  );
+  const nearWater = h <= WATER_LEVEL + 1;
+  const isMountain = h >= SNOW_LINE - 3;
+  if (h >= SNOW_LINE) return 'snow';
+  if (nearWater) return 'sand';
+  if (slope > 4 || isMountain) return 'stone';
+  return 'grass';
 }
 
 function computeDifficulty(timerMs) {
@@ -538,22 +567,28 @@ class BoyCharacterAssets {
   }
 
   async load() {
-    const [fistRoot, kickRoot, jumpRoot, danceRoot] = await Promise.all([
+    const [idleRoot, walkRoot, runRoot, fistRoot, kickRoot, jumpRoot, danceRoot] = await Promise.all([
+      this.loader.loadAsync('/assets/boy-idle.fbx'),
+      this.loader.loadAsync('/assets/boy-walk.fbx'),
+      this.loader.loadAsync('/assets/boy-run.fbx'),
       this.loader.loadAsync('/assets/boy-fist.fbx'),
       this.loader.loadAsync('/assets/boy-kick.fbx'),
       this.loader.loadAsync('/assets/boy-jump.fbx'),
       this.loader.loadAsync('/assets/boy-dance.fbx')
     ]);
 
-    const base = fistRoot;
+    const base = idleRoot;
     const clips = {
+      idle: idleRoot.animations?.[0] || null,
+      walk: walkRoot.animations?.[0] || null,
+      run: runRoot.animations?.[0] || null,
       fist: fistRoot.animations?.[0] || null,
       kick: kickRoot.animations?.[0] || null,
       jump: jumpRoot.animations?.[0] || null,
       dance: danceRoot.animations?.[0] || null
     };
-    if (!clips.fist || !clips.kick || !clips.jump || !clips.dance) {
-      throw new Error('Boy FBX clips missing (fist/kick/jump/dance).');
+    if (!clips.idle || !clips.walk || !clips.run || !clips.fist || !clips.kick || !clips.jump || !clips.dance) {
+      throw new Error('Boy FBX clips missing (idle/walk/run/fist/kick/jump/dance).');
     }
 
     base.traverse((obj) => {
@@ -603,22 +638,25 @@ class BoyCharacterController {
 
     this.mixer = new THREE.AnimationMixer(this.root);
     this.actions = {
-      idle: this.mixer.clipAction(assets.clips.fist),
-      walk: this.mixer.clipAction(assets.clips.kick),
-      run: this.mixer.clipAction(assets.clips.jump),
+      idle: this.mixer.clipAction(assets.clips.idle),
+      walk: this.mixer.clipAction(assets.clips.walk),
+      run: this.mixer.clipAction(assets.clips.run),
       fist: this.mixer.clipAction(assets.clips.fist),
       kick: this.mixer.clipAction(assets.clips.kick),
       jump: this.mixer.clipAction(assets.clips.jump),
       dance: this.mixer.clipAction(assets.clips.dance)
     };
 
+    this.actions.idle.loop = THREE.LoopRepeat;
+    this.actions.walk.loop = THREE.LoopRepeat;
+    this.actions.run.loop = THREE.LoopRepeat;
     this.actions.idle.play();
-    this.actions.idle.timeScale = 0.35;
+    this.actions.idle.timeScale = 1.0;
     this.actions.walk.play();
-    this.actions.walk.timeScale = 0.7;
+    this.actions.walk.timeScale = 1.0;
     this.actions.walk.enabled = false;
     this.actions.run.play();
-    this.actions.run.timeScale = 1.2;
+    this.actions.run.timeScale = 1.0;
     this.actions.run.enabled = false;
 
     for (const key of ['fist', 'kick', 'jump', 'dance']) {
@@ -636,7 +674,8 @@ class BoyCharacterController {
       hitApplied: false,
       queueType: null,
       lastStartAt: 0,
-      holdType: null
+      holdType: null,
+      cycleIndex: 0
     };
     this.dance = { active: false, startAt: 0, minUntil: 0, endAt: 0 };
     this.hitCallback = null;
@@ -657,7 +696,7 @@ class BoyCharacterController {
     this.move.sprinting = sprinting;
   }
 
-  fadeTo(name, duration = 0.18) {
+  fadeTo(name, duration = FADE_TIME) {
     if (this.current === name) return;
     const prev = this.actions[this.current];
     const next = this.actions[name];
@@ -678,8 +717,17 @@ class BoyCharacterController {
   }
 
   setHeldAttack(type) {
-    this.attack.holdType = type;
-    if (type && this.attack.active) this.attack.queueType = type;
+    this.attack.holdType = type ? 'cycle' : null;
+    if (this.attack.holdType && this.attack.active && !this.attack.queueType) {
+      this.attack.queueType = 'cycle';
+    }
+  }
+
+  nextAttackType() {
+    const sequence = ['fist', 'kick', 'jump'];
+    const type = sequence[this.attack.cycleIndex % sequence.length];
+    this.attack.cycleIndex += 1;
+    return type;
   }
 
   startAttack(type, nowMs) {
@@ -699,13 +747,14 @@ class BoyCharacterController {
     this.startAttack(type, nowMs);
   }
 
-  requestAttack(type, nowMs) {
+  requestAttack(nowMs, isPressed = false) {
     if (this.dance.active) return null;
     if (!this.attack.active) {
-      const started = this.startAttack(type, nowMs);
-      return started ? type : null;
+      const next = isPressed ? 'fist' : this.nextAttackType();
+      const started = this.startAttack(next, nowMs);
+      return started ? next : null;
     }
-    this.attack.queueType = type;
+    this.attack.queueType = isPressed ? 'fist' : 'cycle';
     return null;
   }
 
@@ -718,7 +767,7 @@ class BoyCharacterController {
     this.attack.active = false;
     this.attack.type = null;
     this.attack.queueType = null;
-    this.fadeTo('dance', 0.2);
+    this.fadeTo('dance', FADE_TIME);
     return true;
   }
 
@@ -749,8 +798,9 @@ class BoyCharacterController {
         const queued = this.attack.queueType || this.attack.holdType;
         this.attack.queueType = null;
         if (queued) {
-          const started = this.startAttack(queued, nowMs + ATTACK_BLEND_GAP * 1000);
-          if (started) return queued;
+          const next = queued === 'cycle' ? this.nextAttackType() : queued;
+          const started = this.startAttack(next, nowMs + ATTACK_BLEND_GAP * 1000);
+          if (started) return next;
         }
         this.attack.active = false;
         this.attack.type = null;
@@ -759,9 +809,11 @@ class BoyCharacterController {
 
     if (!this.dance.active && !this.attack.active) {
       const moving = this.move.speed > 0.1;
-      if (!moving) this.fadeTo('idle', 0.2);
-      else if (this.move.sprinting) this.fadeTo('run', 0.2);
-      else this.fadeTo('walk', 0.2);
+      if (!moving) this.fadeTo('idle', FADE_TIME);
+      else if (this.move.sprinting) this.fadeTo('run', FADE_TIME);
+      else this.fadeTo('walk', FADE_TIME);
+      this.actions.walk.timeScale = clamp(this.move.speed / Math.max(0.001, WALK_SPEED), 0.85, 1.2);
+      this.actions.run.timeScale = clamp(this.move.speed / Math.max(0.001, RUN_SPEED), 0.85, 1.2);
     }
 
     this.mixer.update(dtSec);
@@ -988,7 +1040,8 @@ class ZombieEnemy {
       const dirX = desiredX / d;
       const dirZ = desiredZ / d;
       const arriveFactor = clamp(d / ARRIVE_RADIUS, 0.25, 1);
-      const speed = lerp(ZOMBIE_WALK_SPEED, ZOMBIE_MAX_SPEED, clamp(context.difficultyLevel / 8, 0, 1)) * arriveFactor;
+      const aggro = context.aggressionScale ?? 1;
+      const speed = lerp(ZOMBIE_WALK_SPEED, ZOMBIE_MAX_SPEED, clamp(context.difficultyLevel / 8, 0, 1)) * arriveFactor * aggro;
       const targetVx = dirX * speed;
       const targetVz = dirZ * speed;
 
@@ -1081,8 +1134,6 @@ class InputController {
     this.attackQueued = false;
     this.attackPresses = 0;
     this.attackHeld = false;
-    this.boyAttackHeld = { fist: false, kick: false, jump: false };
-    this.boyAttackPresses = [];
     this.enabled = false;
     this.cameraOrbit = { yaw: 0, pitch: 0.45, distance: 10 };
 
@@ -1097,18 +1148,6 @@ class InputController {
         this.attackPresses += 1;
         this.attackHeld = true;
       }
-      if (e.code === 'KeyJ') {
-        this.boyAttackHeld.fist = true;
-        this.boyAttackPresses.push('fist');
-      }
-      if (e.code === 'KeyK') {
-        this.boyAttackHeld.kick = true;
-        this.boyAttackPresses.push('kick');
-      }
-      if (e.code === 'KeyL') {
-        this.boyAttackHeld.jump = true;
-        this.boyAttackPresses.push('jump');
-      }
     });
 
     document.addEventListener('keyup', (e) => {
@@ -1118,9 +1157,6 @@ class InputController {
       if (e.code === 'ArrowRight') this.right = false;
       if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') this.sprint = false;
       if (e.code === 'Space') this.attackHeld = false;
-      if (e.code === 'KeyJ') this.boyAttackHeld.fist = false;
-      if (e.code === 'KeyK') this.boyAttackHeld.kick = false;
-      if (e.code === 'KeyL') this.boyAttackHeld.jump = false;
     });
 
     this.canvas.addEventListener('click', () => {
@@ -1153,24 +1189,9 @@ class InputController {
       left: this.left,
       right: this.right,
       sprint: this.sprint,
-      attack: this.attackQueued || this.attackHeld || this.boyAttackHeld.fist || this.boyAttackHeld.kick || this.boyAttackHeld.jump,
+      attack: this.attackQueued || this.attackHeld,
       yaw: this.cameraOrbit.yaw
     };
-  }
-
-  consumeBoyAttackPress() {
-    return this.boyAttackPresses.shift() || null;
-  }
-
-  latestBoyHeldAttack() {
-    for (let i = this.boyAttackPresses.length - 1; i >= 0; i -= 1) {
-      const k = this.boyAttackPresses[i];
-      if (this.boyAttackHeld[k]) return k;
-    }
-    if (this.boyAttackHeld.jump) return 'jump';
-    if (this.boyAttackHeld.kick) return 'kick';
-    if (this.boyAttackHeld.fist) return 'fist';
-    return null;
   }
 }
 
@@ -1303,9 +1324,7 @@ class ChunkManager {
       snow: [],
       trunk: [],
       leaves: [],
-      rock: [],
-      grassDetail: [],
-      flowers: []
+      rock: []
     };
 
     const waterNeeded = { value: false };
@@ -1344,30 +1363,6 @@ class ChunkManager {
 
         if (h < WATER_LEVEL) waterNeeded.value = true;
 
-        const floraRnd = hash2(this.seed ^ 211, x, z);
-        if (topType === 'grass' && h > WATER_LEVEL + 1 && slope < 3) {
-          if (floraRnd > 0.76) {
-            buckets.grassDetail.push({
-              x: x + (hash2(this.seed ^ 301, x, z) - 0.5) * 0.45,
-              y: h + 0.2,
-              z: z + (hash2(this.seed ^ 347, x, z) - 0.5) * 0.45,
-              sx: 0.08,
-              sy: 0.5 + hash2(this.seed ^ 401, x, z) * 0.3,
-              sz: 0.08
-            });
-          }
-          if (floraRnd > 0.965) {
-            buckets.flowers.push({
-              x: x + (hash2(this.seed ^ 433, x, z) - 0.5) * 0.3,
-              y: h + 0.15,
-              z: z + (hash2(this.seed ^ 467, x, z) - 0.5) * 0.3,
-              sx: 0.18,
-              sy: 0.18,
-              sz: 0.18
-            });
-          }
-        }
-
         const treeRnd = hash2(this.seed ^ 521, x, z);
         if (topType === 'grass' && h > WATER_LEVEL + 1 && slope < 2.5 && moisture > 0.44 && treeRnd > 0.988) {
           this.buildTree(x, h + 1, z, buckets);
@@ -1388,9 +1383,7 @@ class ChunkManager {
       this.makeInstanced(this.geo.block, this.mats.snow, buckets.snow),
       this.makeInstanced(this.geo.block, this.mats.trunk, buckets.trunk),
       this.makeInstanced(this.geo.block, this.mats.leaves, buckets.leaves),
-      this.makeInstanced(this.geo.block, this.mats.rock, buckets.rock),
-      this.makeInstanced(this.geo.blade, this.mats.grassBlade, buckets.grassDetail, false, false),
-      this.makeInstanced(this.geo.block, this.mats.flower, buckets.flowers, false, true)
+      this.makeInstanced(this.geo.block, this.mats.rock, buckets.rock)
     ].filter(Boolean);
 
     for (const mesh of meshes) group.add(mesh);
@@ -1407,6 +1400,175 @@ class ChunkManager {
   }
 }
 
+class DecorationSystem {
+  constructor(scene, geo) {
+    this.scene = scene;
+    this.geo = geo;
+    this.group = new THREE.Group();
+    this.scene.add(this.group);
+
+    this.maxShort = 1200;
+    this.maxTall = 700;
+    this.maxFlowers = 220;
+    this.lastCenter = new THREE.Vector2(999999, 999999);
+    this.lastBuildAt = 0;
+
+    this.shortMat = this.makeSwayMaterial('#63c451', 0.045);
+    this.tallMat = this.makeSwayMaterial('#7fd05d', 0.07);
+    this.flowerMat = this.makeSwayMaterial('#ffc7da', 0.02);
+
+    this.shortMesh = new THREE.InstancedMesh(geo.blade, this.shortMat, this.maxShort);
+    this.tallMesh = new THREE.InstancedMesh(geo.blade, this.tallMat, this.maxTall);
+    this.flowerMesh = new THREE.InstancedMesh(geo.block, this.flowerMat, this.maxFlowers);
+    this.shortMesh.count = 0;
+    this.tallMesh.count = 0;
+    this.flowerMesh.count = 0;
+    this.group.add(this.shortMesh, this.tallMesh, this.flowerMesh);
+
+    this.tmpM = new THREE.Matrix4();
+    this.tmpQ = new THREE.Quaternion();
+    this.tmpS = new THREE.Vector3();
+  }
+
+  makeSwayMaterial(color, swayAmount) {
+    const mat = new THREE.MeshLambertMaterial({ color, transparent: true, opacity: 0.95 });
+    mat.onBeforeCompile = (shader) => {
+      shader.uniforms.uTime = { value: 0 };
+      shader.uniforms.uPlayerPos = { value: new THREE.Vector3() };
+      shader.uniforms.uRadius = { value: GRASS_RADIUS };
+      shader.vertexShader = shader.vertexShader
+        .replace(
+          '#include <begin_vertex>',
+          `
+          #include <begin_vertex>
+          float sway = sin((modelMatrix[3].x + modelMatrix[3].z) * 0.23 + uTime * 1.8) * ${swayAmount.toFixed(3)};
+          transformed.x += sway * (position.y + 0.2);
+          transformed.z += cos((modelMatrix[3].x - modelMatrix[3].z) * 0.19 + uTime * 1.4) * ${ (swayAmount * 0.7).toFixed(3)} * (position.y + 0.2);
+          `
+        );
+      shader.fragmentShader = shader.fragmentShader.replace(
+        'vec4 diffuseColor = vec4( diffuse, opacity );',
+        `
+        float distFade = 1.0;
+        float d = distance(vViewPosition, vec3(0.0));
+        distFade = smoothstep(220.0, 25.0, d);
+        vec4 diffuseColor = vec4(diffuse, opacity * distFade);
+        `
+      );
+      mat.userData.shader = shader;
+    };
+    return mat;
+  }
+
+  setMatUniforms(playerPos, timeSec) {
+    for (const mat of [this.shortMat, this.tallMat, this.flowerMat]) {
+      const shader = mat.userData.shader;
+      if (!shader) continue;
+      shader.uniforms.uTime.value = timeSec;
+      shader.uniforms.uPlayerPos.value.set(playerPos.x, playerPos.y, playerPos.z);
+    }
+  }
+
+  maybeRebuild(playerPos, nowMs) {
+    const dx = playerPos.x - this.lastCenter.x;
+    const dz = playerPos.z - this.lastCenter.y;
+    if (nowMs - this.lastBuildAt < 280 && dx * dx + dz * dz < 8 * 8) return;
+    this.lastBuildAt = nowMs;
+    this.lastCenter.set(playerPos.x, playerPos.z);
+    this.rebuild(playerPos);
+  }
+
+  writeInstance(mesh, idx, x, y, z, sx, sy, sz, ry) {
+    this.tmpQ.setFromEuler(new THREE.Euler(0, ry, 0));
+    this.tmpS.set(sx, sy, sz);
+    this.tmpM.compose(new THREE.Vector3(x, y, z), this.tmpQ, this.tmpS);
+    mesh.setMatrixAt(idx, this.tmpM);
+  }
+
+  rebuild(center) {
+    let shortCount = 0;
+    let tallCount = 0;
+    let flowerCount = 0;
+    const radius = GRASS_RADIUS;
+    const minX = Math.floor(center.x - radius);
+    const maxX = Math.floor(center.x + radius);
+    const minZ = Math.floor(center.z - radius);
+    const maxZ = Math.floor(center.z + radius);
+
+    for (let x = minX; x <= maxX; x += 1) {
+      for (let z = minZ; z <= maxZ; z += 1) {
+        const dx = x - center.x;
+        const dz = z - center.z;
+        const d2 = dx * dx + dz * dz;
+        if (d2 > radius * radius) continue;
+
+        const h = terrainHeightWithSeed(ACTIVE_WORLD_SEED, x, z);
+        const top = terrainSurfaceType(ACTIVE_WORLD_SEED, x, z, h);
+        if (top !== 'grass') continue;
+        const slope = Math.abs(terrainHeightWithSeed(ACTIVE_WORLD_SEED, x + 1, z) - terrainHeightWithSeed(ACTIVE_WORLD_SEED, x - 1, z));
+        const rnd = hash2(ACTIVE_WORLD_SEED ^ 7717, x, z);
+
+        if (rnd < GRASS_DENSITY && shortCount < this.maxShort) {
+          this.writeInstance(
+            this.shortMesh,
+            shortCount++,
+            x + (hash2(ACTIVE_WORLD_SEED ^ 117, x, z) - 0.5) * 0.6,
+            h + 0.18,
+            z + (hash2(ACTIVE_WORLD_SEED ^ 139, x, z) - 0.5) * 0.6,
+            0.07,
+            0.35 + hash2(ACTIVE_WORLD_SEED ^ 181, x, z) * 0.25,
+            0.07,
+            hash2(ACTIVE_WORLD_SEED ^ 193, x, z) * Math.PI
+          );
+        }
+
+        if (rnd > 0.76 && rnd < 0.76 + GRASS_DENSITY * 0.55 && tallCount < this.maxTall) {
+          this.writeInstance(
+            this.tallMesh,
+            tallCount++,
+            x + (hash2(ACTIVE_WORLD_SEED ^ 211, x, z) - 0.5) * 0.55,
+            h + 0.22,
+            z + (hash2(ACTIVE_WORLD_SEED ^ 239, x, z) - 0.5) * 0.55,
+            0.08,
+            0.55 + hash2(ACTIVE_WORLD_SEED ^ 251, x, z) * 0.3,
+            0.08,
+            hash2(ACTIVE_WORLD_SEED ^ 271, x, z) * Math.PI
+          );
+        }
+
+        const nearWater = Math.abs(h - WATER_LEVEL) <= 2;
+        const meadow = slope < 2 && moistureAt(ACTIVE_WORLD_SEED, x, z) > 0.52;
+        if ((nearWater || meadow) && rnd > 1 - FLOWER_DENSITY && flowerCount < this.maxFlowers) {
+          this.writeInstance(
+            this.flowerMesh,
+            flowerCount++,
+            x + (hash2(ACTIVE_WORLD_SEED ^ 307, x, z) - 0.5) * 0.45,
+            h + 0.14,
+            z + (hash2(ACTIVE_WORLD_SEED ^ 331, x, z) - 0.5) * 0.45,
+            0.18,
+            0.18,
+            0.18,
+            hash2(ACTIVE_WORLD_SEED ^ 359, x, z) * Math.PI
+          );
+        }
+      }
+    }
+
+    this.shortMesh.count = shortCount;
+    this.tallMesh.count = tallCount;
+    this.flowerMesh.count = flowerCount;
+    this.shortMesh.instanceMatrix.needsUpdate = true;
+    this.tallMesh.instanceMatrix.needsUpdate = true;
+    this.flowerMesh.instanceMatrix.needsUpdate = true;
+  }
+
+  update(localPlayerPos, nowMs, timeSec) {
+    if (!localPlayerPos) return;
+    this.setMatUniforms(localPlayerPos, timeSec);
+    this.maybeRebuild(localPlayerPos, nowMs);
+  }
+}
+
 class WorldRenderer {
   constructor(canvas, input, zombieAssets, girlAssets, boyAssets) {
     this.input = input;
@@ -1415,8 +1577,8 @@ class WorldRenderer {
     this.boyAssets = boyAssets;
 
     this.scene = new THREE.Scene();
-    this.scene.background = new THREE.Color('#7fb2ff');
-    this.scene.fog = new THREE.Fog('#9ac0ff', 70, 260);
+    this.scene.background = new THREE.Color('#f6b38f');
+    this.scene.fog = new THREE.Fog('#f2b894', 90, 300);
 
     this.camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.1, 250);
     this.renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
@@ -1424,9 +1586,9 @@ class WorldRenderer {
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     this.renderer.shadowMap.enabled = true;
 
-    this.scene.add(new THREE.HemisphereLight(0xd4e8ff, 0x4a5a3a, 0.9));
-    const sun = new THREE.DirectionalLight(0xfff3d3, 1.08);
-    sun.position.set(120, 180, 90);
+    this.scene.add(new THREE.HemisphereLight(0xffd0b0, 0x5f4f46, 0.8));
+    const sun = new THREE.DirectionalLight(0xffb782, 0.95);
+    sun.position.set(110, 160, 70);
     sun.castShadow = true;
     sun.shadow.mapSize.set(2048, 2048);
     sun.shadow.camera.near = 1;
@@ -1472,6 +1634,7 @@ class WorldRenderer {
     this.effects = [];
     this.localPlayerId = null;
     this.chunkManager = new ChunkManager(this.scene, this.geo, this.mats);
+    this.decorationSystem = new DecorationSystem(this.scene, this.geo);
     this.setWorldSeed(ACTIVE_WORLD_SEED);
 
     window.addEventListener('resize', () => {
@@ -1721,6 +1884,20 @@ class WorldRenderer {
     }
   }
 
+  spawnRomanceHearts(x, y, z) {
+    for (let i = 0; i < 3; i += 1) {
+      const mesh = new THREE.Mesh(this.geo.heart, new THREE.MeshBasicMaterial({ color: '#ff7ea7' }));
+      mesh.position.set(x + (Math.random() - 0.5) * 0.35, y + Math.random() * 0.2, z + (Math.random() - 0.5) * 0.35);
+      mesh.scale.setScalar(0.55 + Math.random() * 0.35);
+      this.scene.add(mesh);
+      this.effects.push({
+        mesh,
+        vel: new THREE.Vector3((Math.random() - 0.5) * 0.05, 0.05 + Math.random() * 0.05, (Math.random() - 0.5) * 0.05),
+        life: 0.8 + Math.random() * 0.5
+      });
+    }
+  }
+
   update(dtSec, timeSec, mode) {
     for (const ent of this.players.values()) {
       if (mode === 'multiplayer') {
@@ -1780,6 +1957,7 @@ class WorldRenderer {
     const local = this.players.get(this.localPlayerId);
     if (local) {
       this.chunkManager.update(local.mesh.position);
+      this.decorationSystem.update(local.mesh.position, nowMs, timeSec);
     }
 
     this.updateCamera(dtSec);
@@ -1828,6 +2006,134 @@ class HitFeedback {
   }
 }
 
+class RomanceAudioSystem {
+  constructor() {
+    this.musicEnabled = true;
+    this.sfxEnabled = true;
+    this.music = new Audio('/assets/audio/romance-ambient.mp3');
+    this.music.loop = true;
+    this.music.volume = 0.25;
+    this.heartbeat = new Audio('/assets/audio/heartbeat-loop.mp3');
+    this.heartbeat.loop = true;
+    this.heartbeat.volume = 0.0;
+    this.presence = new Audio('/assets/audio/presence-chime.mp3');
+    this.presence.volume = 0.5;
+    this.heart = new Audio('/assets/audio/heart-pickup.mp3');
+    this.heart.volume = 0.45;
+    this.lastPresenceAt = 0;
+  }
+
+  setToggles(musicOn, sfxOn) {
+    this.musicEnabled = !!musicOn;
+    this.sfxEnabled = !!sfxOn;
+    if (!this.musicEnabled) {
+      this.music.pause();
+      this.heartbeat.pause();
+    }
+  }
+
+  tryStartAmbient() {
+    if (!this.musicEnabled) return;
+    if (this.music.paused) this.music.play().catch(() => {});
+  }
+
+  playPresence(nowMs) {
+    if (!this.sfxEnabled || nowMs - this.lastPresenceAt < 6500) return;
+    this.lastPresenceAt = nowMs;
+    this.presence.currentTime = 0;
+    this.presence.play().catch(() => {});
+  }
+
+  playHeartPickup() {
+    if (!this.sfxEnabled) return;
+    this.heart.currentTime = 0;
+    this.heart.play().catch(() => {});
+  }
+
+  setHeartbeat(level) {
+    if (!this.musicEnabled) return;
+    const clamped = clamp(level, 0, 1);
+    if (clamped > 0.01) {
+      if (this.heartbeat.paused) this.heartbeat.play().catch(() => {});
+      this.heartbeat.volume = clamped * 0.22;
+    } else {
+      this.heartbeat.volume = Math.max(0, this.heartbeat.volume - 0.02);
+      if (this.heartbeat.volume <= 0.005) this.heartbeat.pause();
+    }
+  }
+}
+
+class RomanceProximitySystem {
+  constructor(world, audio) {
+    this.world = world;
+    this.audio = audio;
+    this.hintText = '';
+    this.hintUntil = 0;
+    this.vignette = 0;
+    this.heartSpawnAt = 0;
+    this.currentDistance = null;
+    this.aggressionScale = 1;
+  }
+
+  reset() {
+    this.hintText = '';
+    this.hintUntil = 0;
+    this.vignette = 0;
+    this.currentDistance = null;
+    this.aggressionScale = 1;
+    ui.romanceHint.classList.add('hidden');
+    ui.romanticVignette.classList.add('hidden');
+    this.audio.setHeartbeat(0);
+  }
+
+  update(mode, nowMs, dtSec) {
+    if (mode !== 'multiplayer') {
+      this.reset();
+      return;
+    }
+
+    const me = this.world.players.get(this.world.localPlayerId);
+    const other = [...this.world.players.entries()].find(([id]) => id !== this.world.localPlayerId)?.[1];
+    if (!me || !other) {
+      this.reset();
+      return;
+    }
+
+    const d = me.mesh.position.distanceTo(other.mesh.position);
+    this.currentDistance = d;
+
+    if (d < PRESENCE_DIST) {
+      this.hintText = 'You feel their presence...';
+      this.hintUntil = nowMs + 1500;
+      this.audio.playPresence(nowMs);
+    }
+
+    if (nowMs < this.hintUntil) {
+      ui.romanceHint.textContent = this.hintText;
+      ui.romanceHint.classList.remove('hidden');
+    } else {
+      ui.romanceHint.classList.add('hidden');
+    }
+
+    const heartbeatTarget = d < HEARTBEAT_DIST ? 1 : 0;
+    this.vignette += (heartbeatTarget - this.vignette) * Math.min(1, dtSec * 4);
+    ui.romanticVignette.classList.toggle('hidden', this.vignette < 0.02);
+    ui.romanticVignette.style.opacity = `${this.vignette * 0.9}`;
+    this.audio.setHeartbeat(this.vignette);
+
+    if (d < SPARKLE_DIST) {
+      this.aggressionScale = 0.9;
+      if (nowMs >= this.heartSpawnAt) {
+        const mid = me.mesh.position.clone().lerp(other.mesh.position, 0.5);
+        this.world.spawnRomanceHearts(mid.x, mid.y + 1.2, mid.z);
+        this.heartSpawnAt = nowMs + 220;
+      }
+    } else {
+      this.aggressionScale = 1;
+    }
+  }
+}
+
 class SinglePlayerSession {
   constructor(world, input, feedback) {
     this.world = world;
@@ -1858,6 +2164,7 @@ class SinglePlayerSession {
     this.zombies = [];
     this.nextZombieId = 1;
     this.kills = 0;
+    this.aggressionScale = 1;
 
     this.world.syncPlayerFromSimulation(this.player);
     this.girlController = this.player.character === 'girl' ? this.world.getGirlController(this.player.id) : null;
@@ -1895,13 +2202,21 @@ class SinglePlayerSession {
     if (len > 0) {
       move.x /= len;
       move.z /= len;
-      const baseSpeed = this.input.sprint ? RUN_SPEED : WALK_SPEED;
+      const walkSpeed = this.player.character === 'girl' ? GIRL_WALK_SPEED : WALK_SPEED;
+      const runSpeed = this.player.character === 'girl' ? GIRL_RUN_SPEED : RUN_SPEED;
+      const baseSpeed = this.input.sprint ? runSpeed : walkSpeed;
       const attackSlow = (this.girlController?.isAttacking() || this.boyController?.isAttacking()) ? 0.4 : 1;
       const danceSlow = this.boyController?.isDancing() ? 0.1 : 1;
       const speed = baseSpeed * attackSlow * danceSlow;
       this.player.vx += (move.x * speed - this.player.vx) * Math.min(1, 14 * dtSec);
       this.player.vz += (move.z * speed - this.player.vz) * Math.min(1, 14 * dtSec);
-      this.player.rot = Math.atan2(move.x, move.z);
+      const desiredYaw = Math.atan2(move.x, move.z);
+      if (this.player.character === 'boy') {
+        const deltaYaw = normalizeAngle(desiredYaw - this.player.rot);
+        this.player.rot = normalizeAngle(this.player.rot + deltaYaw * Math.min(1, 12 * dtSec));
+      } else {
+        this.player.rot = desiredYaw;
+      }
     } else {
       this.player.vx *= Math.exp(-10 * dtSec);
       this.player.vz *= Math.exp(-10 * dtSec);
@@ -1916,7 +2231,7 @@ class SinglePlayerSession {
       this.girlController.setAttackHeld(this.input.attackHeld);
     }
     if (this.player.character === 'boy' && this.boyController) {
-      this.boyController.setHeldAttack(this.input.latestBoyHeldAttack());
+      this.boyController.setHeldAttack(this.input.attackHeld);
     }
 
     while (this.input.consumeAttackPress()) {
@@ -1928,18 +2243,16 @@ class SinglePlayerSession {
       }
     }
 
-    if (this.player.character !== 'girl' && this.input.attackHeld && nowMs >= this.player.attackCooldownUntil) {
+    if (this.player.character !== 'girl' && this.player.character !== 'boy' && this.input.attackHeld && nowMs >= this.player.attackCooldownUntil) {
       this.player.attackCooldownUntil = nowMs + MIN_ATTACK_INTERVAL * 1000;
       this.applyMeleeDamage(20, 3.2, Math.PI * 0.8, nowMs);
     }
 
     if (this.player.character === 'boy' && this.boyController && !this.boyController.isDancing()) {
-      let key;
-      while ((key = this.input.consumeBoyAttackPress())) {
-        this.boyController.requestAttack(key, nowMs);
+      while (this.input.consumeAttackPress()) {
+        this.boyController.requestAttack(nowMs, true);
       }
-      const held = this.input.latestBoyHeldAttack();
-      if (held) this.boyController.requestAttack(held, nowMs);
+      if (this.input.attackHeld) this.boyController.requestAttack(nowMs, false);
     }
   }
 
@@ -1991,6 +2304,7 @@ class SinglePlayerSession {
         player: this.player,
         zombies: this.zombies,
         difficultyLevel: this.difficultyLevel,
+        aggressionScale: this.aggressionScale,
         onAttackHit: (attacker, target) => this.onAttackHit(attacker, target)
       });
     }
@@ -2059,13 +2373,18 @@ class SinglePlayerSession {
   destroy() {
     this.running = false;
   }
+
+  setAggressionScale(scale) {
+    this.aggressionScale = clamp(scale, 0.7, 1);
+  }
 }
 
 class MultiplayerSession {
-  constructor(world, input, feedback) {
+  constructor(world, input, feedback, audio) {
     this.world = world;
     this.input = input;
     this.feedback = feedback;
+    this.audio = audio;
 
     this.socket = null;
     this.connectPromise = null;
@@ -2076,6 +2395,7 @@ class MultiplayerSession {
     this.myVoteSent = false;
     this.inputTimer = null;
     this.lastDanceSentAt = 0;
+    this.prevHearts = 0;
 
     this.inputTimer = setInterval(() => {
       if (!this.matchActive || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
@@ -2258,6 +2578,8 @@ class MultiplayerSession {
     const me = state.players.find((p) => p.id === this.myPlayerId);
     const other = state.players.find((p) => p.id !== this.myPlayerId);
     if (!me) return;
+    if (me.hearts > this.prevHearts) this.audio.playHeartPickup();
+    this.prevHearts = me.hearts;
 
     ui.statsEl.textContent = `Timer: ${state.timerSec}s | HP: ${Math.round(me.hp)} | Hearts: ${me.hearts}/${HEART_TARGET} | Zombies: ${state.zombieCount}`;
     ui.objectiveEl.textContent = `You: ${me.sentence || ''} | Teammate: ${other?.sentence || ''}`;
@@ -2393,17 +2715,15 @@ class MultiplayerSession {
         while (this.input.consumeAttackPress()) {}
         const controller = this.world.getBoyController(this.myPlayerId);
         if (controller) {
-          let key;
-          while ((key = this.input.consumeBoyAttackPress())) {
-            const started = controller.requestAttack(key, nowMs);
+          controller.setHeldAttack(this.input.attackHeld);
+          while (this.input.consumeAttackPress()) {
+            const started = controller.requestAttack(nowMs, true);
             if (started && this.socket && this.socket.readyState === WebSocket.OPEN) {
               this.socket.send(JSON.stringify({ type: 'boy_attack', attackType: started }));
             }
           }
-          const held = this.input.latestBoyHeldAttack();
-          controller.setHeldAttack(held);
-          if (held) {
-            const started = controller.requestAttack(held, nowMs);
+          if (this.input.attackHeld) {
+            const started = controller.requestAttack(nowMs, false);
             if (started && this.socket && this.socket.readyState === WebSocket.OPEN) {
               this.socket.send(JSON.stringify({ type: 'boy_attack', attackType: started }));
             }
@@ -2421,16 +2741,20 @@ class MultiplayerSession {
     if (this.inputTimer) clearInterval(this.inputTimer);
     if (this.socket) this.socket.close();
   }
+
+  setAggressionScale(_scale) {}
 }
 
 class App {
   constructor() {
     this.feedback = new HitFeedback();
+    this.audio = new RomanceAudioSystem();
     this.input = new InputController(ui.canvas);
     this.zombieAssets = new ZombieAssets();
     this.girlAssets = new GirlCharacterAssets();
     this.boyAssets = new BoyCharacterAssets();
     this.world = null;
+    this.romance = null;
     this.activeSession = null;
     this.mode = 'none';
 
@@ -2457,7 +2781,11 @@ class App {
     try {
       await Promise.all([this.zombieAssets.load(), this.girlAssets.load(), this.boyAssets.load()]);
       this.world = new WorldRenderer(ui.canvas, this.input, this.zombieAssets, this.girlAssets, this.boyAssets);
+      this.romance = new RomanceProximitySystem(this.world, this.audio);
       this.bindUi();
+      ui.musicToggle.onchange = () => this.audio.setToggles(ui.musicToggle.checked, ui.sfxToggle.checked);
+      ui.sfxToggle.onchange = () => this.audio.setToggles(ui.musicToggle.checked, ui.sfxToggle.checked);
+      this.audio.setToggles(ui.musicToggle.checked, ui.sfxToggle.checked);
       ui.menuError.textContent = '';
       ui.toModeBtn.disabled = false;
       ui.singleModeBtn.disabled = false;
@@ -2488,13 +2816,16 @@ class App {
   }
 
   bindUi() {
+    const unlockAudio = () => this.audio.tryStartAmbient();
     ui.toModeBtn.onclick = () => {
+      unlockAudio();
       hidePanels();
       ui.modeMenu.classList.remove('hidden');
       hideAllOverlays();
     };
 
     ui.backToStartBtn.onclick = () => {
+      unlockAudio();
       this.stopSession();
       hidePanels();
       hideAllOverlays();
@@ -2503,10 +2834,11 @@ class App {
       ui.radar.classList.add('hidden');
     };
 
-    ui.singleModeBtn.onclick = () => this.startSingle();
-    ui.multiModeBtn.onclick = () => this.startMultiplayerMenu();
+    ui.singleModeBtn.onclick = () => { unlockAudio(); this.startSingle(); };
+    ui.multiModeBtn.onclick = () => { unlockAudio(); this.startMultiplayerMenu(); };
 
     ui.backToModeBtn.onclick = () => {
+      unlockAudio();
       this.stopSession();
       hideAllOverlays();
       hidePanels();
@@ -2518,14 +2850,17 @@ class App {
     };
 
     ui.createRoomBtn.onclick = () => {
+      unlockAudio();
       if (this.activeSession instanceof MultiplayerSession) this.activeSession.createRoom();
     };
 
     ui.joinRoomBtn.onclick = () => {
+      unlockAudio();
       if (this.activeSession instanceof MultiplayerSession) this.activeSession.joinRoom(ui.joinCodeInput.value);
     };
 
     ui.backToLobbyBtn.onclick = () => {
+      unlockAudio();
       this.stopSession();
       hideAllOverlays();
       hidePanels();
@@ -2536,7 +2871,7 @@ class App {
       ui.menuError.textContent = '';
     };
 
-    ui.singleRestartBtn.onclick = () => this.startSingle();
+    ui.singleRestartBtn.onclick = () => { unlockAudio(); this.startSingle(); };
   }
 
   stopSession() {
@@ -2569,7 +2904,7 @@ class App {
     ui.roomInfo.textContent = '';
     ui.menuError.textContent = '';
     this.mode = 'multiplayer';
-    this.activeSession = new MultiplayerSession(this.world, this.input, this.feedback);
+    this.activeSession = new MultiplayerSession(this.world, this.input, this.feedback, this.audio);
   }
 
   loop(nowMs) {
@@ -2581,6 +2916,12 @@ class App {
     while (this.accumulator >= this.fixedDt && simSteps < 8) {
       this.simTimeMs += this.fixedDt * 1000;
       if (this.activeSession) this.activeSession.update(this.fixedDt, this.simTimeMs);
+      if (this.romance) {
+        this.romance.update(this.mode, this.simTimeMs, this.fixedDt);
+        if (this.activeSession?.setAggressionScale) {
+          this.activeSession.setAggressionScale(this.romance.aggressionScale);
+        }
+      }
       this.accumulator -= this.fixedDt;
       simSteps += 1;
     }

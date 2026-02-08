@@ -25,6 +25,10 @@ const HARD_ZOMBIE_CAP = 36;
 
 const PLAYER_MAX_HP = 100;
 const PLAYER_RESPAWN_MS = 3000;
+const PLAYER_WALK_SPEED = 2.2;
+const PLAYER_RUN_SPEED = 3.5;
+const GIRL_WALK_SPEED = 4.5;
+const GIRL_RUN_SPEED = 7.2;
 const PLAYER_ATTACK_COOLDOWN_MS = 500;
 const PLAYER_ATTACK_RANGE = 3.2;
 const PLAYER_ATTACK_ARC = Math.PI * 0.8;
@@ -230,7 +234,13 @@ class ZombieEnemy {
 
   getMoveSpeed(room) {
     const t = clamp(room.difficultyLevel / 8, 0, 1);
-    return lerp(WALK_SPEED, MAX_SPEED, t);
+    let speed = lerp(WALK_SPEED, MAX_SPEED, t);
+    const alivePlayers = [...room.players.values()].filter((p) => p.alive);
+    if (alivePlayers.length >= 2) {
+      const d = Math.sqrt(dist2(alivePlayers[0], alivePlayers[1]));
+      if (d < 5) speed *= 0.9;
+    }
+    return speed;
   }
 
   setState(next, now) {
@@ -654,7 +664,9 @@ function updatePlayers(room, now, dtSec) {
     if (len > 0) {
       move.x /= len;
       move.z /= len;
-      const speed = player.input.sprint ? 7.2 : 4.5;
+      const walkSpeed = player.character === 'girl' ? GIRL_WALK_SPEED : PLAYER_WALK_SPEED;
+      const runSpeed = player.character === 'girl' ? GIRL_RUN_SPEED : PLAYER_RUN_SPEED;
+      const speed = player.input.sprint ? runSpeed : walkSpeed;
       player.vx += (move.x * speed - player.vx) * Math.min(1, 14 * dtSec);
       player.vz += (move.z * speed - player.vz) * Math.min(1, 14 * dtSec);
       player.rot = Math.atan2(move.x, move.z);

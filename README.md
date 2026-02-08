@@ -40,15 +40,20 @@ Behavior:
 
 ## Boy Character FBX + Continuous Separate Attacks
 BOY now uses FBX animations:
+- `client/assets/boy-idle.fbx`
+- `client/assets/boy-walk.fbx`
+- `client/assets/boy-run.fbx`
 - `client/assets/boy-fist.fbx`
 - `client/assets/boy-kick.fbx`
 - `client/assets/boy-jump.fbx`
 - `client/assets/boy-dance.fbx`
 
 Controls for BOY:
-- `J`: fist attack (hold to repeat)
-- `K`: kick attack (hold to repeat)
-- `L`: jump attack (hold to repeat)
+- `Arrow Up`: walk forward animation
+- `Shift + Arrow Up`: run animation
+- `Arrow keys`: move (forward/back/strafe)
+- `Shift`: sprint while moving
+- `Space`: continuous combined BOY attack chain (hold to continue)
 
 Behavior:
 - Idle / Walk / Run blended states on the FBX model
@@ -111,6 +116,18 @@ Key config constants in `/client/game.js`:
 - `WATER_LEVEL`
 - `SNOW_LINE`
 - `SEED`
+
+## Romance Atmosphere System
+- Dynamic romantic decoration now uses `DecorationSystem`:
+  - Instanced grass + flowers around the local player only
+  - Wind sway and distance fade for performance
+- `RomanceProximitySystem` adds:
+  - Presence hint/chime when close to teammate
+  - Subtle pink vignette + heartbeat when very close
+  - Tiny floating heart particles at closest distance
+- Audio placeholders can be added under:
+  - `/Users/vikas/Documents/New project/client/assets/audio`
+  - See `/Users/vikas/Documents/New project/client/assets/audio/README.md` for filenames.
 
 ## Controls
 - Arrow keys: move
