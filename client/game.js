@@ -60,6 +60,11 @@ const STUN_MS = 220;
 
 const ZOMBIE_COLLIDER_RADIUS = 0.5;
 const ZOMBIE_COLLIDER_HALF_HEIGHT = ZOMBIE_TARGET_HEIGHT * 0.5;
+const PLAYER_MIN_HEIGHT = 1.2;
+const PLAYER_COLLIDER_RADIUS = 0.42;
+const PLAYER_COLLIDER_HEIGHT = 1.8;
+const CAMERA_MIN_GROUND_OFFSET = 0.9;
+const PLAYER_KILL_Y = -20;
 
 const ZOMBIE_STATE = {
   IDLE: 'IDLE',
@@ -1636,6 +1641,20 @@ class WorldRenderer {
     this.chunkManager = new ChunkManager(this.scene, this.geo, this.mats);
     this.decorationSystem = new DecorationSystem(this.scene, this.geo);
     this.setWorldSeed(ACTIVE_WORLD_SEED);
+    this.debugGround = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.55, 0.55, 0.04, 14),
+      new THREE.MeshBasicMaterial({ color: 0x4fe3ff, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
+    );
+    this.debugGround.visible = false;
+    this.debugGround.renderOrder = 1000;
+    this.scene.add(this.debugGround);
+    this.debugCollider = new THREE.Mesh(
+      new THREE.BoxGeometry(PLAYER_COLLIDER_RADIUS * 2, PLAYER_COLLIDER_HEIGHT, PLAYER_COLLIDER_RADIUS * 2),
+      new THREE.MeshBasicMaterial({ color: 0xff7ea7, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
+    );
+    this.debugCollider.visible = false;
+    this.debugCollider.renderOrder = 1000;
+    this.scene.add(this.debugCollider);
 
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -1744,18 +1763,27 @@ class WorldRenderer {
           toRot: p.rot || 0,
           moveSpeed: 0,
           sprinting: false,
-          damageFlash: false
+          damageFlash: false,
+          alive: true,
+          respawnAt: 0
         });
       }
       const ent = this.players.get(p.id);
+      const groundY = Number.isFinite(p.groundY) ? p.groundY : terrainHeight(p.x, p.z) + PLAYER_MIN_HEIGHT;
+      const safeY = Math.max(p.y, groundY);
       ent.from.copy(ent.renderPos);
-      ent.target.set(p.x, p.y, p.z);
+      ent.target.set(p.x, safeY, p.z);
       ent.fromRot = ent.rot;
       ent.toRot = p.rot || 0;
       ent.interpT = 0;
       ent.moveSpeed = p.moveSpeed || 0;
       ent.sprinting = !!p.sprinting;
       ent.damageFlash = !!p.damageFlash;
+      ent.alive = p.alive !== false;
+      ent.respawnAt = Number.isFinite(p.respawnAt) ? p.respawnAt : 0;
+      ent.mesh.visible = ent.alive;
+      ent.groundY = groundY;
+      ent.grounded = !!p.grounded;
     }
 
     for (const [id, ent] of this.players.entries()) {
@@ -1903,6 +1931,12 @@ class WorldRenderer {
       if (mode === 'multiplayer') {
         ent.interpT = clamp(ent.interpT + dtSec / 0.05, 0, 1);
         ent.renderPos.lerpVectors(ent.from, ent.target, ent.interpT);
+        const localGround = terrainHeight(ent.renderPos.x, ent.renderPos.z) + PLAYER_MIN_HEIGHT;
+        if (ent.renderPos.y < localGround) {
+          ent.renderPos.y = localGround;
+          ent.target.y = Math.max(ent.target.y, localGround);
+          ent.from.y = Math.max(ent.from.y, localGround);
+        }
         const rDelta = normalizeAngle(ent.toRot - ent.fromRot);
         ent.rot = normalizeAngle(ent.fromRot + rDelta * ent.interpT);
         ent.mesh.position.copy(ent.renderPos);
@@ -1958,6 +1992,21 @@ class WorldRenderer {
     if (local) {
       this.chunkManager.update(local.mesh.position);
       this.decorationSystem.update(local.mesh.position, nowMs, timeSec);
+      const groundY = terrainHeight(local.mesh.position.x, local.mesh.position.z) + PLAYER_MIN_HEIGHT;
+      this.debugGround.visible = mode === 'multiplayer';
+      this.debugCollider.visible = mode === 'multiplayer';
+      if (mode === 'multiplayer') {
+        this.debugGround.position.set(local.mesh.position.x, groundY, local.mesh.position.z);
+        this.debugCollider.position.set(
+          local.mesh.position.x,
+          local.mesh.position.y + (PLAYER_COLLIDER_HEIGHT * 0.5 - PLAYER_MIN_HEIGHT),
+          local.mesh.position.z
+        );
+        this.debugCollider.rotation.y = local.mesh.rotation.y;
+      }
+    } else {
+      this.debugGround.visible = false;
+      this.debugCollider.visible = false;
     }
 
     this.updateCamera(dtSec);
@@ -1977,8 +2026,14 @@ class WorldRenderer {
       Math.cos(orbit.yaw) * Math.cos(orbit.pitch)
     );
     const desired = target.clone().addScaledVector(dir, orbit.distance);
+    const targetGroundY = terrainHeight(target.x, target.z) + PLAYER_MIN_HEIGHT;
+    target.y = Math.max(target.y, targetGroundY + 0.35);
+    const cameraGroundY = terrainHeight(desired.x, desired.z);
+    desired.y = Math.max(desired.y, cameraGroundY + CAMERA_MIN_GROUND_OFFSET);
     const lerpFactor = 1 - Math.pow(0.002, dtSec);
     this.camera.position.lerp(desired, lerpFactor);
+    const cameraFloor = terrainHeight(this.camera.position.x, this.camera.position.z) + CAMERA_MIN_GROUND_OFFSET;
+    if (this.camera.position.y < cameraFloor) this.camera.position.y = cameraFloor;
     this.camera.lookAt(target);
   }
 }
@@ -2571,6 +2626,22 @@ class MultiplayerSession {
       if (event.type === 'zombieHit' && event.targetPlayerId === this.myPlayerId) {
         this.feedback.trigger();
       }
+
+      if (event.type === 'playerDeath') {
+        const ent = this.world.players.get(event.playerId);
+        if (ent) ent.mesh.visible = false;
+      }
+
+      if (event.type === 'playerRespawn') {
+        const ent = this.world.players.get(event.playerId);
+        if (!ent) continue;
+        ent.mesh.visible = true;
+        ent.from.set(event.x, event.y, event.z);
+        ent.target.set(event.x, event.y, event.z);
+        ent.renderPos.set(event.x, event.y, event.z);
+        ent.mesh.position.set(event.x, event.y, event.z);
+        ent.interpT = 1;
+      }
     }
   }
 
@@ -2590,6 +2661,15 @@ class MultiplayerSession {
       ui.distanceEl.textContent = `Distance to teammate: ${d}m${hint}`;
     } else {
       ui.distanceEl.textContent = 'Waiting for teammate...';
+    }
+
+    if (!me.alive) {
+      const remainingSec = Math.max(0, Math.ceil((me.respawnAt - Date.now()) / 1000));
+      ui.deathOverlay.textContent = `You died, respawning in ${remainingSec}s...`;
+      this.input.enabled = false;
+    } else if (this.matchActive) {
+      ui.deathOverlay.textContent = 'You died, respawning...';
+      this.input.enabled = true;
     }
 
     if (me.character === 'boy' && state.zombieCount === 0) {
@@ -2694,6 +2774,14 @@ class MultiplayerSession {
   update(_dtSec, nowMs) {
     if (this.matchActive && this.currentState) {
       const me = this.currentState.players.find((p) => p.id === this.myPlayerId);
+      if (me && me.alive && me.y <= PLAYER_KILL_Y + 1 && this.socket && this.socket.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify({ type: 'playerDied', reason: 'client_killY_request' }));
+      }
+      if (!me?.alive) {
+        while (this.input.consumeAttackPress()) {}
+        this.drawRadar();
+        return;
+      }
       if (me?.character === 'girl') {
         const controller = this.world.getGirlController(this.myPlayerId);
         if (controller) {
@@ -2768,7 +2856,8 @@ class App {
       el: null,
       fpsFrames: 0,
       fpsElapsed: 0,
-      simStepsAccum: 0
+      simStepsAccum: 0,
+      lastPhysicsLogAt: 0
     };
   }
 
@@ -2936,7 +3025,18 @@ class App {
       if (this.debug.fpsElapsed >= 0.5) {
         const fps = Math.round(this.debug.fpsFrames / this.debug.fpsElapsed);
         const simPerSec = Math.round(this.debug.simStepsAccum / this.debug.fpsElapsed);
-        this.debug.el.textContent = `fps: ${fps} | dt: ${(realDeltaSec * 1000).toFixed(1)}ms | sim: ${simPerSec}/s`;
+        const state = this.activeSession instanceof MultiplayerSession ? this.activeSession.currentState : null;
+        const me = state?.players?.find((p) => p.id === this.activeSession?.myPlayerId);
+        const groundY = me?.groundY;
+        const py = me?.y;
+        const grounded = me?.grounded;
+        this.debug.el.textContent = `fps: ${fps} | dt: ${(realDeltaSec * 1000).toFixed(1)}ms | sim: ${simPerSec}/s | y:${Number.isFinite(py) ? py.toFixed(2) : '--'} g:${Number.isFinite(groundY) ? groundY.toFixed(2) : '--'} grounded:${grounded ? 'Y' : 'N'}`;
+        if (state && me && nowMs - this.debug.lastPhysicsLogAt > 1000) {
+          this.debug.lastPhysicsLogAt = nowMs;
+          console.log(
+            `[mp-physics] y=${Number.isFinite(py) ? py.toFixed(3) : 'na'} groundY=${Number.isFinite(groundY) ? groundY.toFixed(3) : 'na'} grounded=${grounded ? 1 : 0}`
+          );
+        }
         this.debug.fpsFrames = 0;
         this.debug.fpsElapsed = 0;
         this.debug.simStepsAccum = 0;

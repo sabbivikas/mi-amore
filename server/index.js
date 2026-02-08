@@ -35,6 +35,14 @@ const PLAYER_ATTACK_ARC = Math.PI * 0.8;
 const BOY_ATTACK_COOLDOWN_MS = 250;
 const BOY_ATTACK_RANGE = 1.7;
 const BOY_ATTACK_ARC = (100 * Math.PI) / 180;
+const PLAYER_GRAVITY = 26;
+const PLAYER_MIN_HEIGHT = 1.2;
+const PLAYER_SAFE_SPAWN_HEIGHT = 0.75;
+const PLAYER_GROUND_EPSILON = 0.04;
+const PLAYER_COLLIDER_RADIUS = 0.42;
+const PLAYER_COLLIDER_HEIGHT = 1.8;
+const PLAYER_KILL_Y = -20;
+const RESPAWN_POINT_ATTEMPTS = 18;
 
 const ZOMBIE_TARGET_HEIGHT = 1.95;
 const ZOMBIE_COLLIDER_RADIUS = 0.5;
@@ -102,34 +110,91 @@ function normalizeAngle(a) {
   return out;
 }
 
-function terrainHeight(x, z) {
-  const h = Math.sin(x * 0.12) * 1.8 + Math.cos(z * 0.09) * 1.4 + Math.sin((x + z) * 0.06) * 1.2;
-  return Math.max(0, Math.round(h + 2));
+function hash2(seed, x, z) {
+  let h = (seed ^ (x * 374761393) ^ (z * 668265263)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967295;
 }
 
-function isSolidAt(x, y, z) {
-  return y <= terrainHeight(x, z);
+function smoothstep(t) {
+  return t * t * (3 - 2 * t);
 }
 
-function getGroundedY(x, z) {
-  return terrainHeight(x, z) + ZOMBIE_COLLIDER_HALF_HEIGHT;
+function valueNoise2(seed, x, z) {
+  const x0 = Math.floor(x);
+  const z0 = Math.floor(z);
+  const x1 = x0 + 1;
+  const z1 = z0 + 1;
+  const tx = smoothstep(x - x0);
+  const tz = smoothstep(z - z0);
+
+  const n00 = hash2(seed, x0, z0);
+  const n10 = hash2(seed, x1, z0);
+  const n01 = hash2(seed, x0, z1);
+  const n11 = hash2(seed, x1, z1);
+  const nx0 = n00 + (n10 - n00) * tx;
+  const nx1 = n01 + (n11 - n01) * tx;
+  return nx0 + (nx1 - nx0) * tz;
 }
 
-function canMoveCapsule(x, z) {
+function fbm(seed, x, z, octaves = 4) {
+  let amplitude = 1;
+  let frequency = 1;
+  let sum = 0;
+  let total = 0;
+  for (let i = 0; i < octaves; i += 1) {
+    sum += valueNoise2(seed + i * 97, x * frequency, z * frequency) * amplitude;
+    total += amplitude;
+    amplitude *= 0.5;
+    frequency *= 2;
+  }
+  return sum / total;
+}
+
+function terrainHeightWithSeed(seed, x, z) {
+  const nx = x * 0.014;
+  const nz = z * 0.014;
+  const continents = fbm(seed, nx * 0.45, nz * 0.45, 3);
+  const hills = fbm(seed ^ 0x9e3779b9, nx * 1.4, nz * 1.4, 4);
+  const mountains = fbm(seed ^ 0x85ebca6b, nx * 2.2, nz * 2.2, 5);
+  const mountainMask = smoothstep(clamp((continents - 0.58) * 2.6, 0, 1));
+  const lowlands = 7 + (continents - 0.5) * 4.5;
+  const hilly = lowlands + (hills - 0.5) * 7.0;
+  const peak = hilly + mountainMask * (mountains - 0.42) * 18;
+  return Math.max(1, Math.round(peak));
+}
+
+function terrainHeightForRoom(room, x, z) {
+  return terrainHeightWithSeed(room?.worldSeed ?? SEED, x, z);
+}
+
+function isSolidAt(room, x, y, z) {
+  return y <= terrainHeightForRoom(room, x, z);
+}
+
+function getGroundedY(room, x, z) {
+  return terrainHeightForRoom(room, x, z) + ZOMBIE_COLLIDER_HALF_HEIGHT;
+}
+
+function playerGroundY(room, x, z) {
+  return terrainHeightForRoom(room, x, z) + PLAYER_MIN_HEIGHT;
+}
+
+function canMoveCapsule(room, x, z, radius = ZOMBIE_COLLIDER_RADIUS) {
   if (x < -ROOM_SIZE / 2 || x > ROOM_SIZE / 2 || z < -ROOM_SIZE / 2 || z > ROOM_SIZE / 2) return false;
 
   const sampleOffsets = [
     [0, 0],
-    [ZOMBIE_COLLIDER_RADIUS * 0.8, 0],
-    [-ZOMBIE_COLLIDER_RADIUS * 0.8, 0],
-    [0, ZOMBIE_COLLIDER_RADIUS * 0.8],
-    [0, -ZOMBIE_COLLIDER_RADIUS * 0.8]
+    [radius * 0.8, 0],
+    [-radius * 0.8, 0],
+    [0, radius * 0.8],
+    [0, -radius * 0.8]
   ];
 
   let minH = Infinity;
   let maxH = -Infinity;
   for (const [ox, oz] of sampleOffsets) {
-    const h = terrainHeight(x + ox, z + oz);
+    const h = terrainHeightForRoom(room, x + ox, z + oz);
     minH = Math.min(minH, h);
     maxH = Math.max(maxH, h);
   }
@@ -137,7 +202,7 @@ function canMoveCapsule(x, z) {
   return maxH - minH <= 2.2;
 }
 
-function sampleLineOfSight(from, to) {
+function sampleLineOfSight(room, from, to) {
   const dx = to.x - from.x;
   const dy = to.y - from.y;
   const dz = to.z - from.z;
@@ -148,7 +213,7 @@ function sampleLineOfSight(from, to) {
     const x = from.x + dx * t;
     const y = from.y + dy * t;
     const z = from.z + dz * t;
-    if (isSolidAt(x, y, z)) return false;
+    if (isSolidAt(room, x, y, z)) return false;
   }
   return true;
 }
@@ -198,7 +263,7 @@ function randomSpawnAroundPlayers(room) {
         break;
       }
     }
-    if (safe && canMoveCapsule(x, z)) return { x, z };
+    if (safe && canMoveCapsule(room, x, z)) return { x, z };
   }
 
   return randomPosition(18);
@@ -210,7 +275,7 @@ class ZombieEnemy {
     this.id = nextZombieId++;
     this.x = x;
     this.z = z;
-    this.y = getGroundedY(x, z);
+    this.y = getGroundedY(room, x, z);
     this.rot = 0;
     this.vx = 0;
     this.vz = 0;
@@ -272,6 +337,7 @@ class ZombieEnemy {
       if (delta > (Math.PI * 2) / 3) continue;
 
       const los = sampleLineOfSight(
+        this.room,
         { x: this.x, y: this.y + 0.8, z: this.z },
         { x: p.x, y: p.y + 0.8, z: p.z }
       );
@@ -360,6 +426,7 @@ class ZombieEnemy {
       const dz = activeTarget.z - this.z;
       targetDist = Math.hypot(dx, dz) || 0.0001;
       const lineOfSight = sampleLineOfSight(
+        this.room,
         { x: this.x, y: this.y + 0.8, z: this.z },
         { x: activeTarget.x, y: activeTarget.y + 0.8, z: activeTarget.z }
       );
@@ -430,19 +497,19 @@ class ZombieEnemy {
     const nx = this.x + this.vx * dtSec;
     const nz = this.z + this.vz * dtSec;
 
-    if (canMoveCapsule(nx, this.z)) {
+    if (canMoveCapsule(this.room, nx, this.z)) {
       this.x = nx;
     } else {
       this.vx *= -0.22;
     }
 
-    if (canMoveCapsule(this.x, nz)) {
+    if (canMoveCapsule(this.room, this.x, nz)) {
       this.z = nz;
     } else {
       this.vz *= -0.22;
     }
 
-    this.y = getGroundedY(this.x, this.z);
+    this.y = getGroundedY(this.room, this.x, this.z);
   }
 
   toNetwork(now) {
@@ -459,21 +526,25 @@ class ZombieEnemy {
   }
 }
 
-function makePlayer(playerId, character, ws) {
+function makePlayer(room, playerId, character, ws) {
   const spawn = playerId % 2 === 0 ? { x: 2, z: 2 } : { x: -2, z: -2 };
+  const baseGround = playerGroundY(room, spawn.x, spawn.z);
   return {
     id: playerId,
     ws,
     character,
     x: spawn.x,
-    y: terrainHeight(spawn.x, spawn.z) + 1.2,
+    y: baseGround + PLAYER_SAFE_SPAWN_HEIGHT,
     z: spawn.z,
+    vy: 0,
+    grounded: false,
     rot: 0,
     vx: 0,
     vz: 0,
     hp: PLAYER_MAX_HP,
     hearts: 0,
     alive: true,
+    isAlive: true,
     respawnAt: 0,
     attackCooldownUntil: 0,
     input: {
@@ -489,6 +560,109 @@ function makePlayer(playerId, character, ws) {
     deathNoticeUntil: 0,
     damageFlashUntil: 0
   };
+}
+
+function findSafeSpawn(room, playerId) {
+  const anchorSpawns = playerId % 2 === 0
+    ? [{ x: 2, z: 2 }, { x: -4, z: -4 }, { x: 6, z: -2 }]
+    : [{ x: -2, z: -2 }, { x: 4, z: 4 }, { x: -6, z: 2 }];
+
+  const randomSpawns = [];
+  for (let i = 0; i < RESPAWN_POINT_ATTEMPTS; i += 1) {
+    const x = (Math.random() - 0.5) * (ROOM_SIZE - 8);
+    const z = (Math.random() - 0.5) * (ROOM_SIZE - 8);
+    randomSpawns.push({ x, z });
+  }
+
+  const candidates = [...anchorSpawns, ...randomSpawns];
+  for (const candidate of candidates) {
+    if (!canMoveCapsule(room, candidate.x, candidate.z, PLAYER_COLLIDER_RADIUS)) continue;
+    const groundY = playerGroundY(room, candidate.x, candidate.z);
+    return {
+      x: candidate.x,
+      z: candidate.z,
+      y: groundY + PLAYER_SAFE_SPAWN_HEIGHT
+    };
+  }
+
+  const fallback = anchorSpawns[0];
+  const fallbackGround = playerGroundY(room, fallback.x, fallback.z);
+  return { x: fallback.x, z: fallback.z, y: fallbackGround + PLAYER_SAFE_SPAWN_HEIGHT };
+}
+
+function triggerPlayerDeath(room, player, reason, now) {
+  if (!player) return;
+
+  if (!player.alive) {
+    player.respawnAt = now + PLAYER_RESPAWN_MS;
+    player.deathNoticeUntil = player.respawnAt;
+    console.log(`[death triggered] playerId=${player.id} reason=${reason} (already dead, timer reset)`);
+    console.log(`[respawn scheduled] playerId=${player.id} at=${new Date(player.respawnAt).toISOString()}`);
+    room.queueEvent({
+      type: 'playerDeath',
+      playerId: player.id,
+      reason,
+      respawnAt: player.respawnAt,
+      at: now
+    });
+    return;
+  }
+
+  player.hp = 0;
+  player.alive = false;
+  player.isAlive = false;
+  player.respawnAt = now + PLAYER_RESPAWN_MS;
+  player.deathNoticeUntil = player.respawnAt;
+  player.vx = 0;
+  player.vy = 0;
+  player.vz = 0;
+  player.grounded = false;
+  player.input.up = false;
+  player.input.down = false;
+  player.input.left = false;
+  player.input.right = false;
+  player.input.sprint = false;
+  player.input.attack = false;
+  player.hearts = Math.max(0, player.hearts - 2);
+  dropHeart(room, player.x, player.z);
+
+  console.log(`[death triggered] playerId=${player.id} reason=${reason}`);
+  console.log(`[respawn scheduled] playerId=${player.id} at=${new Date(player.respawnAt).toISOString()}`);
+  room.queueEvent({
+    type: 'playerDeath',
+    playerId: player.id,
+    reason,
+    respawnAt: player.respawnAt,
+    at: now
+  });
+}
+
+function executePlayerRespawn(room, player, now) {
+  const spawn = findSafeSpawn(room, player.id);
+  player.alive = true;
+  player.isAlive = true;
+  player.hp = PLAYER_MAX_HP;
+  player.x = spawn.x;
+  player.z = spawn.z;
+  player.y = spawn.y;
+  player.vx = 0;
+  player.vy = 0;
+  player.vz = 0;
+  player.grounded = false;
+  player.attackCooldownUntil = 0;
+  player.damageFlashUntil = 0;
+  player.respawnAt = 0;
+  player.deathNoticeUntil = 0;
+
+  console.log(`[respawn executed] playerId=${player.id} x=${spawn.x.toFixed(2)} y=${spawn.y.toFixed(2)} z=${spawn.z.toFixed(2)}`);
+  room.queueEvent({
+    type: 'playerRespawn',
+    playerId: player.id,
+    x: spawn.x,
+    y: spawn.y,
+    z: spawn.z,
+    at: now
+  });
 }
 
 function serializePlayer(player) {
@@ -550,13 +724,7 @@ function createRoom(code) {
         damage
       });
 
-      if (player.hp <= 0) {
-        player.alive = false;
-        player.respawnAt = now + PLAYER_RESPAWN_MS;
-        player.deathNoticeUntil = now + PLAYER_RESPAWN_MS;
-        player.hearts = Math.max(0, player.hearts - 2);
-        dropHeart(this, player.x, player.z);
-      }
+      if (player.hp <= 0) triggerPlayerDeath(this, player, 'hp_zero', now);
     }
   };
 }
@@ -576,7 +744,7 @@ function spawnInitialHearts(room) {
       id: nextHeartId++,
       x: pos.x,
       z: pos.z,
-      y: terrainHeight(pos.x, pos.z) + 1.1,
+      y: terrainHeightForRoom(room, pos.x, pos.z) + 1.1,
       collectedBy: new Set(),
       type: 'world',
       respawnAt: 0
@@ -598,7 +766,7 @@ function dropHeart(room, x, z) {
     id: nextHeartId++,
     x,
     z,
-    y: terrainHeight(x, z) + 1.1,
+    y: terrainHeightForRoom(room, x, z) + 1.1,
     collectedBy: new Set(),
     type: 'drop',
     respawnAt: 0
@@ -626,11 +794,16 @@ function startMatch(room) {
     player.hp = PLAYER_MAX_HP;
     player.hearts = 0;
     player.alive = true;
+    player.isAlive = true;
     player.respawnAt = 0;
     player.proposalVote = null;
     player.deathNoticeUntil = 0;
     player.vx = 0;
     player.vz = 0;
+    const spawnGround = playerGroundY(room, player.x, player.z);
+    player.y = spawnGround + PLAYER_SAFE_SPAWN_HEIGHT;
+    player.vy = 0;
+    player.grounded = false;
   }
 
   spawnInitialHearts(room);
@@ -643,13 +816,7 @@ function updatePlayers(room, now, dtSec) {
   for (const player of room.players.values()) {
     if (!player.alive) {
       if (now >= player.respawnAt) {
-        player.alive = true;
-        player.hp = PLAYER_MAX_HP;
-        player.x = player.id % 2 === 0 ? 2 : -2;
-        player.z = player.id % 2 === 0 ? 2 : -2;
-        player.y = terrainHeight(player.x, player.z) + 1.2;
-        player.vx = 0;
-        player.vz = 0;
+        executePlayerRespawn(room, player, now);
       }
       continue;
     }
@@ -675,13 +842,43 @@ function updatePlayers(room, now, dtSec) {
       player.vz *= Math.exp(-10 * dtSec);
     }
 
-    player.x += player.vx * dtSec;
-    player.z += player.vz * dtSec;
-
-    player.x = clamp(player.x, -ROOM_SIZE / 2, ROOM_SIZE / 2);
-    player.z = clamp(player.z, -ROOM_SIZE / 2, ROOM_SIZE / 2);
-    player.y = terrainHeight(player.x, player.z) + 1.2;
-
+    const nextX = player.x + player.vx * dtSec;
+    const nextZ = player.z + player.vz * dtSec;
+    if (canMoveCapsule(room, nextX, player.z, PLAYER_COLLIDER_RADIUS)) {
+      player.x = nextX;
+    } else {
+      player.vx *= -0.15;
+    }
+    if (canMoveCapsule(room, player.x, nextZ, PLAYER_COLLIDER_RADIUS)) {
+      player.z = nextZ;
+    } else {
+      player.vz *= -0.15;
+    }
+    const groundY = playerGroundY(room, player.x, player.z);
+    const wasGrounded = player.y <= groundY + PLAYER_GROUND_EPSILON;
+    if (!wasGrounded) {
+      player.vy -= PLAYER_GRAVITY * dtSec;
+    } else if (player.vy < 0) {
+      player.vy = 0;
+    }
+    player.y += player.vy * dtSec;
+    if (player.y <= PLAYER_KILL_Y) {
+      triggerPlayerDeath(room, player, 'fell_below_killY', now);
+      continue;
+    }
+    if (player.y <= groundY + PLAYER_GROUND_EPSILON) {
+      player.y = groundY;
+      player.vy = 0;
+      player.grounded = true;
+    } else {
+      player.grounded = false;
+    }
+    const minSafeY = groundY;
+    if (player.y < minSafeY) {
+      player.y = minSafeY;
+      player.vy = 0;
+      player.grounded = true;
+    }
     if (player.input.attack && now >= player.attackCooldownUntil && !room.proposal.active) {
       const isBoy = player.character === 'boy';
       const range = isBoy ? BOY_ATTACK_RANGE : PLAYER_ATTACK_RANGE;
@@ -748,7 +945,7 @@ function stepRoom(room, now, dtMs) {
           ...heart,
           x: pos.x,
           z: pos.z,
-          y: terrainHeight(pos.x, pos.z) + 1.1,
+          y: terrainHeightForRoom(room, pos.x, pos.z) + 1.1,
           collectedBy: new Set(),
           respawnAt: 0
         };
@@ -789,6 +986,7 @@ function makeStateFor(room, playerId, now) {
     difficultyLevel: room.difficultyLevel,
     players: [...room.players.values()].map((p) => {
       const moveSpeed = Math.hypot(p.vx, p.vz);
+      const groundY = playerGroundY(room, p.x, p.z);
       return {
         id: p.id,
         character: p.character,
@@ -796,11 +994,16 @@ function makeStateFor(room, playerId, now) {
         y: p.y,
         z: p.z,
         rot: p.rot,
+        groundY,
+        grounded: !!p.grounded,
+        vy: p.vy,
         moveSpeed,
         sprinting: p.input.sprint && moveSpeed > 0.2,
         hp: p.hp,
         hearts: p.hearts,
         alive: p.alive,
+        isAlive: p.alive,
+        respawnAt: p.respawnAt,
         sentence: LETTERS.slice(0, p.hearts).join(' '),
         damageFlash: p.damageFlashUntil > now
       };
@@ -881,7 +1084,7 @@ wss.on('connection', (ws) => {
       while (rooms.has(code)) code = randomRoomCode();
       const room = createRoom(code);
       rooms.set(code, room);
-      attachPlayerToRoom(room, makePlayer(playerId, character, ws));
+      attachPlayerToRoom(room, makePlayer(room, playerId, character, ws));
       return;
     }
 
@@ -902,7 +1105,7 @@ wss.on('connection', (ws) => {
         ws.send(JSON.stringify({ type: 'error', message: 'Pick the other character so one Boy + one Girl can play.' }));
         return;
       }
-      attachPlayerToRoom(room, makePlayer(playerId, character, ws));
+      attachPlayerToRoom(room, makePlayer(room, playerId, character, ws));
       return;
     }
 
@@ -920,6 +1123,13 @@ wss.on('connection', (ws) => {
       player.input.sprint = !!input.sprint;
       player.input.attack = !!input.attack;
       player.input.yaw = Number.isFinite(input.yaw) ? input.yaw : 0;
+      return;
+    }
+
+    if (message.type === 'playerDied') {
+      const reason = typeof message.reason === 'string' ? message.reason : 'client_request';
+      const canDie = player.alive && (player.hp <= 0 || player.y <= PLAYER_KILL_Y + 2);
+      if (canDie) triggerPlayerDeath(room, player, reason, Date.now());
       return;
     }
 
