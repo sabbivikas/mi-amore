@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 
-const HEART_TARGET = 20;
+const HEART_TARGET = 10;
 const WORLD_SIZE = 90;
 const PLAYER_MAX_HP = 100;
 const BASE_ZOMBIE_MAX = 4;
@@ -65,6 +65,7 @@ const PLAYER_COLLIDER_RADIUS = 0.42;
 const PLAYER_COLLIDER_HEIGHT = 1.8;
 const CAMERA_MIN_GROUND_OFFSET = 0.9;
 const PLAYER_KILL_Y = -20;
+const SHOW_DEBUG_COLLIDERS = false;
 
 const ZOMBIE_STATE = {
   IDLE: 'IDLE',
@@ -1141,6 +1142,9 @@ class InputController {
     this.attackHeld = false;
     this.enabled = false;
     this.cameraOrbit = { yaw: 0, pitch: 0.45, distance: 10 };
+    this.lastValidMove = new THREE.Vector2(0, -1);
+    this.tmpForward = new THREE.Vector3();
+    this.tmpRight = new THREE.Vector3();
 
     document.addEventListener('keydown', (e) => {
       if (e.code === 'ArrowUp') this.up = true;
@@ -1187,7 +1191,47 @@ class InputController {
     return true;
   }
 
-  snapshot() {
+  getMoveVector(camera = null) {
+    const forwardInput = (this.up ? 1 : 0) - (this.down ? 1 : 0);
+    const rightInput = (this.right ? 1 : 0) - (this.left ? 1 : 0);
+    if (forwardInput === 0 && rightInput === 0) return { x: 0, z: 0 };
+
+    if (camera) {
+      camera.getWorldDirection(this.tmpForward);
+      this.tmpForward.y = 0;
+      if (this.tmpForward.lengthSq() > 1e-6) {
+        this.tmpForward.normalize();
+      } else {
+        this.tmpForward.set(
+          -Math.sin(this.cameraOrbit.yaw),
+          0,
+          -Math.cos(this.cameraOrbit.yaw)
+        );
+      }
+    } else {
+      this.tmpForward.set(
+        -Math.sin(this.cameraOrbit.yaw),
+        0,
+        -Math.cos(this.cameraOrbit.yaw)
+      );
+    }
+
+    this.tmpRight.crossVectors(this.tmpForward, new THREE.Vector3(0, 1, 0)).normalize();
+    const mx = this.tmpForward.x * forwardInput + this.tmpRight.x * rightInput;
+    const mz = this.tmpForward.z * forwardInput + this.tmpRight.z * rightInput;
+    const len = Math.hypot(mx, mz);
+    if (len <= 1e-5) {
+      return { x: this.lastValidMove.x, z: this.lastValidMove.y };
+    }
+
+    const nx = mx / len;
+    const nz = mz / len;
+    this.lastValidMove.set(nx, nz);
+    return { x: nx, z: nz };
+  }
+
+  snapshot(camera = null) {
+    const mv = this.getMoveVector(camera);
     return {
       up: this.up,
       down: this.down,
@@ -1195,6 +1239,8 @@ class InputController {
       right: this.right,
       sprint: this.sprint,
       attack: this.attackQueued || this.attackHeld,
+      moveX: mv.x,
+      moveZ: mv.z,
       yaw: this.cameraOrbit.yaw
     };
   }
@@ -1641,20 +1687,24 @@ class WorldRenderer {
     this.chunkManager = new ChunkManager(this.scene, this.geo, this.mats);
     this.decorationSystem = new DecorationSystem(this.scene, this.geo);
     this.setWorldSeed(ACTIVE_WORLD_SEED);
-    this.debugGround = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.55, 0.55, 0.04, 14),
-      new THREE.MeshBasicMaterial({ color: 0x4fe3ff, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
-    );
-    this.debugGround.visible = false;
-    this.debugGround.renderOrder = 1000;
-    this.scene.add(this.debugGround);
-    this.debugCollider = new THREE.Mesh(
-      new THREE.BoxGeometry(PLAYER_COLLIDER_RADIUS * 2, PLAYER_COLLIDER_HEIGHT, PLAYER_COLLIDER_RADIUS * 2),
-      new THREE.MeshBasicMaterial({ color: 0xff7ea7, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
-    );
-    this.debugCollider.visible = false;
-    this.debugCollider.renderOrder = 1000;
-    this.scene.add(this.debugCollider);
+    this.debugGround = null;
+    this.debugCollider = null;
+    if (SHOW_DEBUG_COLLIDERS) {
+      this.debugGround = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.55, 0.55, 0.04, 14),
+        new THREE.MeshBasicMaterial({ color: 0x4fe3ff, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
+      );
+      this.debugGround.visible = false;
+      this.debugGround.renderOrder = 1000;
+      this.scene.add(this.debugGround);
+      this.debugCollider = new THREE.Mesh(
+        new THREE.BoxGeometry(PLAYER_COLLIDER_RADIUS * 2, PLAYER_COLLIDER_HEIGHT, PLAYER_COLLIDER_RADIUS * 2),
+        new THREE.MeshBasicMaterial({ color: 0xff7ea7, wireframe: true, transparent: true, opacity: 0.8, depthTest: false })
+      );
+      this.debugCollider.visible = false;
+      this.debugCollider.renderOrder = 1000;
+      this.scene.add(this.debugCollider);
+    }
 
     window.addEventListener('resize', () => {
       this.camera.aspect = window.innerWidth / window.innerHeight;
@@ -1865,6 +1915,19 @@ class WorldRenderer {
     controller.triggerNetworkStep(step === 'kick' ? 'kick' : 'punch', atMs || performance.now());
   }
 
+  playGirlCelebrate(playerId, nowMs, durationMs) {
+    const controller = this.getGirlController(playerId);
+    if (!controller) return;
+    const endAt = nowMs + durationMs;
+    const tick = () => {
+      const now = performance.now();
+      if (now >= endAt) return;
+      controller.triggerNetworkStep('kick', now);
+      setTimeout(tick, 700);
+    };
+    tick();
+  }
+
   playBoyAttack(playerId, attackType, atMs) {
     const controller = this.getBoyController(playerId);
     if (!controller) return;
@@ -1957,6 +2020,11 @@ class WorldRenderer {
     const nowMs = performance.now();
     for (const zombie of this.zombies.values()) {
       zombie.updateVisual(dtSec, nowMs, mode === 'multiplayer');
+      const gy = getGroundedY(zombie.x, zombie.z);
+      if (zombie.y < gy) {
+        zombie.y = gy;
+        zombie.root.position.y = gy;
+      }
     }
 
     for (const ent of this.players.values()) {
@@ -1993,9 +2061,9 @@ class WorldRenderer {
       this.chunkManager.update(local.mesh.position);
       this.decorationSystem.update(local.mesh.position, nowMs, timeSec);
       const groundY = terrainHeight(local.mesh.position.x, local.mesh.position.z) + PLAYER_MIN_HEIGHT;
-      this.debugGround.visible = mode === 'multiplayer';
-      this.debugCollider.visible = mode === 'multiplayer';
-      if (mode === 'multiplayer') {
+      if (SHOW_DEBUG_COLLIDERS && this.debugGround && this.debugCollider) {
+        this.debugGround.visible = mode === 'multiplayer';
+        this.debugCollider.visible = mode === 'multiplayer';
         this.debugGround.position.set(local.mesh.position.x, groundY, local.mesh.position.z);
         this.debugCollider.position.set(
           local.mesh.position.x,
@@ -2005,8 +2073,10 @@ class WorldRenderer {
         this.debugCollider.rotation.y = local.mesh.rotation.y;
       }
     } else {
-      this.debugGround.visible = false;
-      this.debugCollider.visible = false;
+      if (SHOW_DEBUG_COLLIDERS && this.debugGround && this.debugCollider) {
+        this.debugGround.visible = false;
+        this.debugCollider.visible = false;
+      }
     }
 
     this.updateCamera(dtSec);
@@ -2247,16 +2317,9 @@ class SinglePlayerSession {
   }
 
   updatePlayer(dtSec, nowMs) {
-    const move = { x: 0, z: 0 };
-    if (this.input.up) move.z -= 1;
-    if (this.input.down) move.z += 1;
-    if (this.input.left) move.x -= 1;
-    if (this.input.right) move.x += 1;
-
+    const move = this.input.getMoveVector(this.world.camera);
     const len = Math.hypot(move.x, move.z);
     if (len > 0) {
-      move.x /= len;
-      move.z /= len;
       const walkSpeed = this.player.character === 'girl' ? GIRL_WALK_SPEED : WALK_SPEED;
       const runSpeed = this.player.character === 'girl' ? GIRL_RUN_SPEED : RUN_SPEED;
       const baseSpeed = this.input.sprint ? runSpeed : walkSpeed;
@@ -2451,10 +2514,13 @@ class MultiplayerSession {
     this.inputTimer = null;
     this.lastDanceSentAt = 0;
     this.prevHearts = 0;
+    this.cutsceneActive = false;
+    this.cutsceneEndAt = 0;
+    this.cutsceneTimers = [];
 
     this.inputTimer = setInterval(() => {
       if (!this.matchActive || !this.socket || this.socket.readyState !== WebSocket.OPEN) return;
-      this.socket.send(JSON.stringify({ type: 'input', input: this.input.snapshot() }));
+      this.socket.send(JSON.stringify({ type: 'input', input: this.input.snapshot(this.world?.camera) }));
       this.input.attackQueued = false;
     }, 33);
   }
@@ -2566,6 +2632,11 @@ class MultiplayerSession {
       return;
     }
 
+    if (message.type === 'valentine_scene') {
+      this.startValentineScene(message);
+      return;
+    }
+
     if (message.type === 'match_end') {
       this.showResult(message.accepted);
       return;
@@ -2608,7 +2679,7 @@ class MultiplayerSession {
       this.world.applyZombieSnapshots(message.zombies, performance.now(), 'multiplayer');
       this.world.applyHearts(message.hearts);
       this.updateHud(message);
-      ui.deathOverlay.classList.toggle('hidden', !message.deathOverlay);
+      ui.deathOverlay.classList.toggle('hidden', this.cutsceneActive || !message.deathOverlay);
       if (!message.proposal.active) {
         ui.proposalOverlay.classList.add('hidden');
         this.myVoteSent = false;
@@ -2645,6 +2716,33 @@ class MultiplayerSession {
     }
   }
 
+  startValentineScene(message) {
+    const now = performance.now();
+    const durationMs = Number.isFinite(message.durationMs) ? message.durationMs : 5200;
+    this.cutsceneActive = true;
+    this.cutsceneEndAt = now + durationMs;
+    this.input.enabled = false;
+    ui.proposalOverlay.classList.remove('hidden');
+    ui.proposalButtons.innerHTML = '';
+    ui.proposalText.textContent = message.line1 || 'Will you be my Valentine?';
+
+    for (const t of this.cutsceneTimers) clearTimeout(t);
+    this.cutsceneTimers.length = 0;
+    this.cutsceneTimers.push(setTimeout(() => {
+      ui.proposalText.textContent = message.line2 || 'Yes!';
+    }, 1300));
+    this.cutsceneTimers.push(setTimeout(() => {
+      ui.proposalOverlay.classList.add('hidden');
+      this.cutsceneActive = false;
+      if (this.matchActive) this.input.enabled = true;
+    }, durationMs));
+
+    const girl = this.currentState?.players?.find((p) => p.character === 'girl');
+    const boy = this.currentState?.players?.find((p) => p.character === 'boy');
+    if (boy) this.world.playBoyDance(boy.id, now, durationMs);
+    if (girl) this.world.playGirlCelebrate(girl.id, now, durationMs);
+  }
+
   updateHud(state) {
     const me = state.players.find((p) => p.id === this.myPlayerId);
     const other = state.players.find((p) => p.id !== this.myPlayerId);
@@ -2652,8 +2750,12 @@ class MultiplayerSession {
     if (me.hearts > this.prevHearts) this.audio.playHeartPickup();
     this.prevHearts = me.hearts;
 
-    ui.statsEl.textContent = `Timer: ${state.timerSec}s | HP: ${Math.round(me.hp)} | Hearts: ${me.hearts}/${HEART_TARGET} | Zombies: ${state.zombieCount}`;
-    ui.objectiveEl.textContent = `You: ${me.sentence || ''} | Teammate: ${other?.sentence || ''}`;
+    const totalHearts = Number.isFinite(state.totalHearts) ? state.totalHearts : HEART_TARGET;
+    const collectedHearts = Number.isFinite(state.heartsCollected) ? state.heartsCollected : me.hearts;
+    ui.statsEl.textContent = `Timer: ${state.timerSec}s | HP: ${Math.round(me.hp)} | Hearts: ${collectedHearts}/${totalHearts} | Zombies: ${state.zombieCount}`;
+    ui.objectiveEl.textContent = collectedHearts >= totalHearts
+      ? 'Objective: Meet your teammate to trigger the valentine scene.'
+      : 'Objective: Collect all hearts together.';
 
     if (other && Number.isFinite(state.otherPlayerDistance)) {
       const d = state.otherPlayerDistance.toFixed(1);
@@ -2667,26 +2769,11 @@ class MultiplayerSession {
       const remainingSec = Math.max(0, Math.ceil((me.respawnAt - Date.now()) / 1000));
       ui.deathOverlay.textContent = `You died, respawning in ${remainingSec}s...`;
       this.input.enabled = false;
-    } else if (this.matchActive) {
+    } else if (this.matchActive && !this.cutsceneActive) {
       ui.deathOverlay.textContent = 'You died, respawning...';
       this.input.enabled = true;
     }
 
-    if (me.character === 'boy' && state.zombieCount === 0) {
-      const controller = this.world.getBoyController(this.myPlayerId);
-      const now = performance.now();
-      if (controller && !controller.isDancing() && now - this.lastDanceSentAt > DANCE_DURATION) {
-        controller.tryStartDance(now, DANCE_DURATION);
-        this.lastDanceSentAt = now;
-        if (this.socket && this.socket.readyState === WebSocket.OPEN) {
-          this.socket.send(JSON.stringify({ type: 'boy_dance', durationMs: DANCE_DURATION }));
-        }
-      }
-    }
-    if (me.character === 'boy' && state.zombieCount > 0) {
-      const controller = this.world.getBoyController(this.myPlayerId);
-      if (controller?.isDancing()) controller.stopDance(performance.now());
-    }
   }
 
   showProposal(byPlayerId) {
@@ -2769,10 +2856,16 @@ class MultiplayerSession {
     drawDot(me.x, me.z, '#6fd0ff', 5);
     if (other) drawDot(other.x, other.z, '#ff8ca8', 5);
     for (const zombie of this.currentState.zombies) drawDot(zombie.x, zombie.z, '#89d66f', 2.5);
+    for (const heart of this.currentState.hearts || []) drawDot(heart.x, heart.z, '#ff4f96', 3);
   }
 
   update(_dtSec, nowMs) {
     if (this.matchActive && this.currentState) {
+      if (this.cutsceneActive) {
+        while (this.input.consumeAttackPress()) {}
+        this.drawRadar();
+        return;
+      }
       const me = this.currentState.players.find((p) => p.id === this.myPlayerId);
       if (me && me.alive && me.y <= PLAYER_KILL_Y + 1 && this.socket && this.socket.readyState === WebSocket.OPEN) {
         this.socket.send(JSON.stringify({ type: 'playerDied', reason: 'client_killY_request' }));
@@ -2826,6 +2919,9 @@ class MultiplayerSession {
     this.destroyed = true;
     this.matchActive = false;
     this.input.enabled = false;
+    for (const t of this.cutsceneTimers) clearTimeout(t);
+    this.cutsceneTimers.length = 0;
+    this.cutsceneActive = false;
     if (this.inputTimer) clearInterval(this.inputTimer);
     if (this.socket) this.socket.close();
   }

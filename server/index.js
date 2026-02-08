@@ -18,7 +18,7 @@ const NETWORK_MS = 1000 / NETWORK_RATE;
 const FIXED_DT_MS = 1000 / 60;
 
 const ROOM_SIZE = 90;
-const HEART_TARGET = 20;
+const HEART_TARGET = 10;
 const BASE_ZOMBIE_MAX = 4;
 const BASE_ZOMBIE_INTERVAL_MS = 7000;
 const HARD_ZOMBIE_CAP = 36;
@@ -43,6 +43,7 @@ const PLAYER_COLLIDER_RADIUS = 0.42;
 const PLAYER_COLLIDER_HEIGHT = 1.8;
 const PLAYER_KILL_Y = -20;
 const RESPAWN_POINT_ATTEMPTS = 18;
+const PLAYER_STEP_HEIGHT = 3.2;
 
 const ZOMBIE_TARGET_HEIGHT = 1.95;
 const ZOMBIE_COLLIDER_RADIUS = 0.5;
@@ -60,6 +61,9 @@ const ATTACK_ANIM_MS = 950;
 const STUN_MS = 220;
 const LOS_STEP = 0.6;
 const SEED = 133742;
+const WATER_LEVEL = 6;
+const MEET_RADIUS = 2.5;
+const VALENTINE_SCENE_MS = 5200;
 
 const LETTERS = 'WILLYOUBEMYVALENTINE'.split('');
 
@@ -180,7 +184,7 @@ function playerGroundY(room, x, z) {
   return terrainHeightForRoom(room, x, z) + PLAYER_MIN_HEIGHT;
 }
 
-function canMoveCapsule(room, x, z, radius = ZOMBIE_COLLIDER_RADIUS) {
+function canMoveCapsule(room, x, z, radius = ZOMBIE_COLLIDER_RADIUS, maxStepHeight = 2.2) {
   if (x < -ROOM_SIZE / 2 || x > ROOM_SIZE / 2 || z < -ROOM_SIZE / 2 || z > ROOM_SIZE / 2) return false;
 
   const sampleOffsets = [
@@ -199,7 +203,7 @@ function canMoveCapsule(room, x, z, radius = ZOMBIE_COLLIDER_RADIUS) {
     maxH = Math.max(maxH, h);
   }
 
-  return maxH - minH <= 2.2;
+  return maxH - minH <= maxStepHeight;
 }
 
 function sampleLineOfSight(room, from, to) {
@@ -243,6 +247,13 @@ function randomPosition(minDistanceFromSpawn = 8) {
   return { x: minDistanceFromSpawn, z: minDistanceFromSpawn };
 }
 
+function isValidGroundPoint(room, x, z) {
+  if (x < -ROOM_SIZE / 2 || x > ROOM_SIZE / 2 || z < -ROOM_SIZE / 2 || z > ROOM_SIZE / 2) return false;
+  const h = terrainHeightForRoom(room, x, z);
+  if (h <= WATER_LEVEL) return false;
+  return canMoveCapsule(room, x, z, ZOMBIE_COLLIDER_RADIUS, 2.6);
+}
+
 function randomSpawnAroundPlayers(room) {
   const players = [...room.players.values()].filter((p) => p.alive);
   if (!players.length) return randomPosition(14);
@@ -263,7 +274,7 @@ function randomSpawnAroundPlayers(room) {
         break;
       }
     }
-    if (safe && canMoveCapsule(room, x, z)) return { x, z };
+    if (safe && isValidGroundPoint(room, x, z)) return { x, z };
   }
 
   return randomPosition(18);
@@ -527,7 +538,10 @@ class ZombieEnemy {
 }
 
 function makePlayer(room, playerId, character, ws) {
-  const spawn = playerId % 2 === 0 ? { x: 2, z: 2 } : { x: -2, z: -2 };
+  const spawnCandidates = playerId % 2 === 0
+    ? [{ x: 22, z: 22 }, { x: 26, z: -18 }, { x: 18, z: -24 }]
+    : [{ x: -22, z: -22 }, { x: -26, z: 18 }, { x: -18, z: 24 }];
+  const spawn = spawnCandidates.find((s) => isValidGroundPoint(room, s.x, s.z)) || spawnCandidates[0];
   const baseGround = playerGroundY(room, spawn.x, spawn.z);
   return {
     id: playerId,
@@ -541,6 +555,7 @@ function makePlayer(room, playerId, character, ws) {
     rot: 0,
     vx: 0,
     vz: 0,
+    lastSafe: { x: spawn.x, y: baseGround + PLAYER_SAFE_SPAWN_HEIGHT, z: spawn.z },
     hp: PLAYER_MAX_HP,
     hearts: 0,
     alive: true,
@@ -554,6 +569,8 @@ function makePlayer(room, playerId, character, ws) {
       right: false,
       sprint: false,
       attack: false,
+      moveX: 0,
+      moveZ: 0,
       yaw: 0
     },
     proposalVote: null,
@@ -576,7 +593,8 @@ function findSafeSpawn(room, playerId) {
 
   const candidates = [...anchorSpawns, ...randomSpawns];
   for (const candidate of candidates) {
-    if (!canMoveCapsule(room, candidate.x, candidate.z, PLAYER_COLLIDER_RADIUS)) continue;
+    if (!isValidGroundPoint(room, candidate.x, candidate.z)) continue;
+    if (!canMoveCapsule(room, candidate.x, candidate.z, PLAYER_COLLIDER_RADIUS, PLAYER_STEP_HEIGHT)) continue;
     const groundY = playerGroundY(room, candidate.x, candidate.z);
     return {
       x: candidate.x,
@@ -623,8 +641,6 @@ function triggerPlayerDeath(room, player, reason, now) {
   player.input.right = false;
   player.input.sprint = false;
   player.input.attack = false;
-  player.hearts = Math.max(0, player.hearts - 2);
-  dropHeart(room, player.x, player.z);
 
   console.log(`[death triggered] playerId=${player.id} reason=${reason}`);
   console.log(`[respawn scheduled] playerId=${player.id} at=${new Date(player.respawnAt).toISOString()}`);
@@ -693,6 +709,14 @@ function createRoom(code) {
     nextZombieSpawnAt: 3000,
     zombies: [],
     hearts: [],
+    heartsTotal: HEART_TARGET,
+    heartsCollected: 0,
+    valentineScene: {
+      triggered: false,
+      active: false,
+      startedAt: 0,
+      durationMs: VALENTINE_SCENE_MS
+    },
     proposal: {
       active: false,
       byPlayerId: null,
@@ -738,16 +762,23 @@ function roomBroadcast(room, payload) {
 
 function spawnInitialHearts(room) {
   room.hearts = [];
-  for (let i = 0; i < 35; i += 1) {
-    const pos = randomPosition(10);
+  room.heartsCollected = 0;
+  for (let i = 0; i < room.heartsTotal; i += 1) {
+    let pos = null;
+    for (let a = 0; a < 120; a += 1) {
+      const test = randomPosition(12);
+      if (!isValidGroundPoint(room, test.x, test.z)) continue;
+      if (room.hearts.some((h) => dist2(h, test) < 7 * 7)) continue;
+      pos = test;
+      break;
+    }
+    if (!pos) pos = randomPosition(10);
     room.hearts.push({
       id: nextHeartId++,
       x: pos.x,
       z: pos.z,
       y: terrainHeightForRoom(room, pos.x, pos.z) + 1.1,
-      collectedBy: new Set(),
-      type: 'world',
-      respawnAt: 0
+      collected: false
     });
   }
 }
@@ -758,7 +789,9 @@ function spawnZombie(room, forced = false) {
   if (!forced && room.zombies.length >= maxZombies) return;
 
   const pos = randomSpawnAroundPlayers(room);
-  room.zombies.push(new ZombieEnemy(room, pos.x, pos.z));
+  const zombie = new ZombieEnemy(room, pos.x, pos.z);
+  zombie.y = terrainHeightForRoom(room, pos.x, pos.z) + ZOMBIE_COLLIDER_HALF_HEIGHT + 0.05;
+  room.zombies.push(zombie);
 }
 
 function dropHeart(room, x, z) {
@@ -767,10 +800,9 @@ function dropHeart(room, x, z) {
     x,
     z,
     y: terrainHeightForRoom(room, x, z) + 1.1,
-    collectedBy: new Set(),
-    type: 'drop',
-    respawnAt: 0
+    collected: false
   });
+  room.heartsTotal += 1;
 }
 
 function startMatch(room) {
@@ -782,12 +814,20 @@ function startMatch(room) {
   room.zombies = [];
   room.events = [];
   room.lastNetworkBroadcastAt = 0;
+  room.heartsTotal = HEART_TARGET;
+  room.heartsCollected = 0;
   room.proposal = {
     active: false,
     byPlayerId: null,
     prompt: 'Will you be my valentine?',
     answered: false,
     accepted: false
+  };
+  room.valentineScene = {
+    triggered: false,
+    active: false,
+    startedAt: 0,
+    durationMs: VALENTINE_SCENE_MS
   };
 
   for (const player of room.players.values()) {
@@ -804,6 +844,14 @@ function startMatch(room) {
     player.y = spawnGround + PLAYER_SAFE_SPAWN_HEIGHT;
     player.vy = 0;
     player.grounded = false;
+    player.input.up = false;
+    player.input.down = false;
+    player.input.left = false;
+    player.input.right = false;
+    player.input.attack = false;
+    player.input.moveX = 0;
+    player.input.moveZ = 0;
+    player.lastSafe = { x: player.x, y: player.y, z: player.z };
   }
 
   spawnInitialHearts(room);
@@ -821,16 +869,25 @@ function updatePlayers(room, now, dtSec) {
       continue;
     }
 
-    const move = { x: 0, z: 0 };
-    if (player.input.up) move.z -= 1;
-    if (player.input.down) move.z += 1;
-    if (player.input.left) move.x -= 1;
-    if (player.input.right) move.x += 1;
+    if (room.valentineScene.active) {
+      player.vx = 0;
+      player.vz = 0;
+      player.vy = 0;
+      player.input.attack = false;
+      continue;
+    }
 
+    const fallbackMoveX = (player.input.right ? 1 : 0) - (player.input.left ? 1 : 0);
+    const fallbackMoveZ = (player.input.up ? -1 : 0) + (player.input.down ? 1 : 0);
+    const move = {
+      x: Number.isFinite(player.input.moveX) ? player.input.moveX : fallbackMoveX,
+      z: Number.isFinite(player.input.moveZ) ? player.input.moveZ : fallbackMoveZ
+    };
     const len = Math.hypot(move.x, move.z);
     if (len > 0) {
-      move.x /= len;
-      move.z /= len;
+      const invLen = 1 / Math.max(1, len);
+      move.x *= invLen;
+      move.z *= invLen;
       const walkSpeed = player.character === 'girl' ? GIRL_WALK_SPEED : PLAYER_WALK_SPEED;
       const runSpeed = player.character === 'girl' ? GIRL_RUN_SPEED : PLAYER_RUN_SPEED;
       const speed = player.input.sprint ? runSpeed : walkSpeed;
@@ -844,12 +901,12 @@ function updatePlayers(room, now, dtSec) {
 
     const nextX = player.x + player.vx * dtSec;
     const nextZ = player.z + player.vz * dtSec;
-    if (canMoveCapsule(room, nextX, player.z, PLAYER_COLLIDER_RADIUS)) {
+    if (canMoveCapsule(room, nextX, player.z, PLAYER_COLLIDER_RADIUS, PLAYER_STEP_HEIGHT)) {
       player.x = nextX;
     } else {
       player.vx *= -0.15;
     }
-    if (canMoveCapsule(room, player.x, nextZ, PLAYER_COLLIDER_RADIUS)) {
+    if (canMoveCapsule(room, player.x, nextZ, PLAYER_COLLIDER_RADIUS, PLAYER_STEP_HEIGHT)) {
       player.z = nextZ;
     } else {
       player.vz *= -0.15;
@@ -863,7 +920,14 @@ function updatePlayers(room, now, dtSec) {
     }
     player.y += player.vy * dtSec;
     if (player.y <= PLAYER_KILL_Y) {
-      triggerPlayerDeath(room, player, 'fell_below_killY', now);
+      const safe = player.lastSafe || { x: player.x, y: groundY, z: player.z };
+      player.x = safe.x;
+      player.y = safe.y;
+      player.z = safe.z;
+      player.vx = 0;
+      player.vy = 0;
+      player.vz = 0;
+      player.grounded = true;
       continue;
     }
     if (player.y <= groundY + PLAYER_GROUND_EPSILON) {
@@ -878,6 +942,9 @@ function updatePlayers(room, now, dtSec) {
       player.y = minSafeY;
       player.vy = 0;
       player.grounded = true;
+    }
+    if (player.grounded) {
+      player.lastSafe = { x: player.x, y: player.y, z: player.z };
     }
     if (player.input.attack && now >= player.attackCooldownUntil && !room.proposal.active) {
       const isBoy = player.character === 'boy';
@@ -896,16 +963,14 @@ function updatePlayers(room, now, dtSec) {
     }
 
     for (const heart of room.hearts) {
-      if (heart.respawnAt > now) continue;
-      if (heart.collectedBy.has(player.id)) continue;
+      if (heart.collected) continue;
       if (dist2(player, heart) <= 1.8 * 1.8) {
-        heart.collectedBy.add(player.id);
-        player.hearts = clamp(player.hearts + 1, 0, HEART_TARGET);
-        if (heart.type === 'drop') {
-          heart.respawnAt = now;
-        } else if (heart.collectedBy.size >= room.players.size) {
-          heart.respawnAt = now + 12000 + Math.random() * 8000;
+        heart.collected = true;
+        room.heartsCollected = clamp(room.heartsCollected + 1, 0, room.heartsTotal);
+        for (const p of room.players.values()) {
+          p.hearts = room.heartsCollected;
         }
+        room.queueEvent({ type: 'heartCollected', heartId: heart.id, byPlayerId: player.id, at: now });
       }
     }
   }
@@ -924,7 +989,7 @@ function stepRoom(room, now, dtMs) {
   room.timerMs += dtMs;
   room.difficultyLevel = computeDifficulty(room.timerMs);
 
-  if (!room.proposal.active && room.timerMs >= room.nextZombieSpawnAt) {
+  if (!room.proposal.active && !room.valentineScene.active && room.timerMs >= room.nextZombieSpawnAt) {
     room.nextZombieSpawnAt = room.timerMs + computeSpawnIntervalMs(room.difficultyLevel);
     spawnZombie(room);
   }
@@ -936,37 +1001,49 @@ function stepRoom(room, now, dtMs) {
     updateZombies(room, now, dtSec);
   }
 
-  room.hearts = room.hearts
-    .map((heart) => {
-      if (heart.respawnAt > 0 && now >= heart.respawnAt) {
-        if (heart.type === 'drop') return null;
-        const pos = randomPosition(10);
-        return {
-          ...heart,
-          x: pos.x,
-          z: pos.z,
-          y: terrainHeightForRoom(room, pos.x, pos.z) + 1.1,
-          collectedBy: new Set(),
-          respawnAt: 0
-        };
-      }
-      return heart;
-    })
-    .filter(Boolean);
-
   const players = [...room.players.values()];
-  if (players.length === 2 && !room.proposal.active) {
-    const bothReady = players[0].hearts >= HEART_TARGET && players[1].hearts >= HEART_TARGET;
-    const closeEnough = Math.sqrt(dist2(players[0], players[1])) <= 3;
-    if (bothReady && closeEnough) {
+  if (players.length === 2 && !room.valentineScene.triggered) {
+    const allHeartsCollected = room.heartsCollected >= room.heartsTotal;
+    const closeEnough = Math.sqrt(dist2(players[0], players[1])) <= MEET_RADIUS;
+    if (allHeartsCollected && closeEnough) {
+      room.valentineScene.triggered = true;
+      room.valentineScene.active = true;
+      room.valentineScene.startedAt = now;
       room.proposal.active = true;
-      room.proposal.byPlayerId = players.find((p) => p.character === 'boy')?.id ?? players[0].id;
       roomBroadcast(room, {
-        type: 'proposal_started',
-        byPlayerId: room.proposal.byPlayerId,
-        prompt: room.proposal.prompt
+        type: 'valentine_scene',
+        startedAt: now,
+        durationMs: room.valentineScene.durationMs,
+        line1: 'Will you be my Valentine?',
+        line2: 'Yes!'
       });
+      roomBroadcast(room, {
+        type: 'boy_dance_event',
+        playerId: players.find((p) => p.character === 'boy')?.id ?? players[0].id,
+        durationMs: room.valentineScene.durationMs,
+        at: now
+      });
+      const girl = players.find((p) => p.character === 'girl');
+      if (girl) {
+        roomBroadcast(room, {
+          type: 'girl_attack_event',
+          playerId: girl.id,
+          step: 'kick',
+          at: now
+        });
+      }
     }
+  }
+
+  if (room.valentineScene.active && now >= room.valentineScene.startedAt + room.valentineScene.durationMs) {
+    room.valentineScene.active = false;
+    room.ended = true;
+    roomBroadcast(room, {
+      type: 'match_end',
+      accepted: true,
+      votes: [...room.players.values()].map((p) => ({ id: p.id, vote: 'yes' }))
+    });
+    return;
   }
 
   if (room.events.length > 0) {
@@ -1000,7 +1077,7 @@ function makeStateFor(room, playerId, now) {
         moveSpeed,
         sprinting: p.input.sprint && moveSpeed > 0.2,
         hp: p.hp,
-        hearts: p.hearts,
+        hearts: room.heartsCollected,
         alive: p.alive,
         isAlive: p.alive,
         respawnAt: p.respawnAt,
@@ -1010,13 +1087,16 @@ function makeStateFor(room, playerId, now) {
     }),
     zombies: room.zombies.map((zombie) => zombie.toNetwork(now)),
     hearts: room.hearts
-      .filter((heart) => heart.respawnAt <= now && !heart.collectedBy.has(playerId))
+      .filter((heart) => !heart.collected)
       .map((heart) => ({ id: heart.id, x: heart.x, y: heart.y, z: heart.z })),
-    targetHearts: HEART_TARGET,
+    heartsCollected: room.heartsCollected,
+    totalHearts: room.heartsTotal,
+    targetHearts: room.heartsTotal,
     zombieCount: room.zombies.length,
     otherPlayerDistance: other ? Math.sqrt(dist2(player, other)) : null,
     deathOverlay: !player.alive && player.deathNoticeUntil > now,
-    proposal: room.proposal
+    proposal: room.proposal,
+    valentineScene: room.valentineScene
   };
 }
 
@@ -1122,6 +1202,8 @@ wss.on('connection', (ws) => {
       player.input.right = !!input.right;
       player.input.sprint = !!input.sprint;
       player.input.attack = !!input.attack;
+      player.input.moveX = Number.isFinite(input.moveX) ? input.moveX : 0;
+      player.input.moveZ = Number.isFinite(input.moveZ) ? input.moveZ : 0;
       player.input.yaw = Number.isFinite(input.yaw) ? input.yaw : 0;
       return;
     }
